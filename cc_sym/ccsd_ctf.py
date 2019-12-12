@@ -70,6 +70,9 @@ class _ChemistsERIs_ctf:
             self.fov.write([], [])
             self.fvv.write([], [])
             self.eia.write([], [])
+
+        self._foo = self.foo.diagonal(preserve_shape=True)
+        self._fvv = self.fvv.diagonal(preserve_shape=True)
         cput0 = (time.clock(), time.time())
         eijab = self.eia.array.reshape(nocc,1,nvir,1) + self.eia.array.reshape(1,nocc,1,nvir)
         self.eijab = tensor(eijab)
@@ -174,7 +177,7 @@ def _make_ao_ints(mol, mo_coeff, nocc, dtype):
 if __name__ == '__main__':
     from pyscf import scf
     from pyscf import gto
-    from pyscf.cc.rccsd_slow import RCCSD as REFCCSD
+    from pyscf.cc.rccsd import RCCSD as REFCCSD
     import os
 
     mol = gto.Mole()
@@ -211,3 +214,6 @@ if __name__ == '__main__':
     from rccsd import RCCSD
     refcc = RCCSD(mf)
     refcc.kernel()
+
+    refcc2 = REFCCSD(mf)
+    refcc2.kernel()

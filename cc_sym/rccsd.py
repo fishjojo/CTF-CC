@@ -61,8 +61,8 @@ def update_amps(cc, t1, t2, eris):
     Fov = imd.cc_Fov(t1,t2,eris)
 
     # Move energy terms to the other side
-    Foo -= foo.diagonal(preserve_shape=True)
-    Fvv -= fvv.diagonal(preserve_shape=True)
+    Foo -= eris._foo
+    Fvv -= eris._fvv
 
     # T1 equation
     t1new = fov.conj().copy()
@@ -115,8 +115,8 @@ def update_amps(cc, t1, t2, eris):
     else:
         Loo = imd.Loo(t1, t2, eris)
         Lvv = imd.Lvv(t1, t2, eris)
-        Loo -= foo.diagonal(preserve_shape=True)
-        Lvv -= fvv.diagonal(preserve_shape=True)
+        Loo -= eris._foo
+        Lvv -= eris._fvv
         Woooo = imd.cc_Woooo(t1, t2, eris)
         Wvoov = imd.cc_Wvoov(t1, t2, eris)
         Wvovo = imd.cc_Wvovo(t1, t2, eris)
@@ -268,6 +268,8 @@ class _ChemistsERIs:
         self.foo = lib.tensor(fock[:nocc,:nocc])
         self.fov = lib.tensor(fock[:nocc,nocc:])
         self.fvv = lib.tensor(fock[nocc:,nocc:])
+        self._foo = self.foo.diagonal(preserve_shape=True)
+        self._fvv = self.fvv.diagonal(preserve_shape=True)
         eia  = mo_e[:nocc,None]- mo_e[None,nocc:]
         eijab = eia[:,None,:,None] + eia[None,:,None,:]
         self.eia = lib.tensor(eia)
@@ -360,90 +362,7 @@ class _IMDS:
 if __name__ == '__main__':
     from pyscf import scf
     from pyscf import gto
-    from pyscf.cc.rccsd_slow import RCCSD as REFCCSD
-
-    mol = gto.M()
-    nocc, nvir = 5, 12
-    nmo = nocc + nvir
-    nmo_pair = nmo*(nmo+1)//2
-    mf = scf.RHF(mol)
-    np.random.seed(12)
-    mf._eri = np.random.random(nmo_pair*(nmo_pair+1)//2)
-    mf.mo_coeff = np.random.random((nmo,nmo))
-    mf.mo_energy = np.arange(0., nmo)
-    mf.mo_occ = np.zeros(nmo)
-    mf.mo_occ[:nocc] = 2
-    vhf = mf.get_veff(mol, mf.make_rdm1())
-    cinv = np.linalg.inv(mf.mo_coeff)
-    mf.get_hcore = lambda *args: (reduce(np.dot, (cinv.T*mf.mo_energy, cinv)) - vhf)
-    mycc = RCCSD(mf)
-    lib = mycc.lib
-    eris = mycc.ao2mo()
-    a = np.random.random((nmo,nmo)) * .1
-    a += a.T.conj()
-
-    eris.foo += a[:nocc,:nocc]
-    eris.fov += a[:nocc,nocc:]
-    eris.fvv += a[nocc:,nocc:]
-    mo_occ = eris.foo.diagonal()
-    mo_vir = eris.fvv.diagonal()
-    eia = mo_occ[:,None] - mo_vir[None,:]
-    eris.eia = lib.tensor(eia)
-    eris.eijab = lib.tensor(eia[:,None,:,None] + eia[None,:,None,:] )
-    #eris.fock += a + a.T.conj()
-    t1 = np.random.random((nocc,nvir)) * .1
-    t2 = np.random.random((nocc,nocc,nvir,nvir)) * .1
-    t2 = t2 + t2.transpose(1,0,3,2)
-    t1 = lib.tensor(t1)
-    t2 = lib.tensor(t2)
-
-    mycc.cc2 = False
-    t1a, t2a = mycc.update_amps(t1, t2, eris)
-    print(pyscflib.finger(t1a.array) - -106360.5276951083)
-    print(pyscflib.finger(t2a.array) - 66540.100267798145)
-    mycc.cc2 = True
-    t1a, t2a = mycc.update_amps(t1, t2, eris)
-    print(pyscflib.finger(t1a.array) - -106360.5276951083)
-    print(pyscflib.finger(t2a.array) - -1517.9391800662809)
-
-    eri1 = np.random.random((nmo,nmo,nmo,nmo)) + np.random.random((nmo,nmo,nmo,nmo))*1j
-    eri1 = eri1.transpose(0,2,1,3)
-    eri1 = eri1 + eri1.transpose(1,0,3,2).conj()
-    eri1 = eri1 + eri1.transpose(2,3,0,1)
-    eri1 *= .1
-    eri1 = lib.tensor(eri1)
-    eris.oooo = eri1[:nocc,:nocc,:nocc,:nocc].copy()
-    eris.ooov = eri1[:nocc,:nocc,:nocc,nocc:].copy()
-    eris.ovoo = eri1[:nocc,nocc:,:nocc,:nocc].copy()
-    eris.ovov = eri1[:nocc,nocc:,:nocc,nocc:].copy()
-    eris.oovv = eri1[:nocc,:nocc,nocc:,nocc:].copy()
-    eris.ovvo = eri1[:nocc,nocc:,nocc:,:nocc].copy()
-    eris.ovvv = eri1[:nocc,nocc:,nocc:,nocc:].copy()
-    eris.vvvv = eri1[nocc:,nocc:,nocc:,nocc:].copy()
-    a = np.random.random((nmo,nmo)) * .1j
-    a = a + a.T.conj()
-    eris.fov = eris.fov + a[:nocc,nocc:]
-    eris.foo = eris.foo + a[:nocc,:nocc]
-    eris.fvv = eris.fvv + a[nocc:,nocc:]
-
-    mo_occ = eris.foo.diagonal()
-    mo_vir = eris.fvv.diagonal()
-    eia = mo_occ[:,None] - mo_vir[None,:]
-    eris.eia = lib.tensor(eia)
-    eris.eijab = lib.tensor(eia[:,None,:,None] + eia[None,:,None,:] )
-    #eris.fock = eris.fock + a + a.T.conj()
-
-    t1 = t1 + np.random.random((nocc,nvir)) * .1j
-    t2 = t2 + np.random.random((nocc,nocc,nvir,nvir)) * .1j
-    t2 = t2 + t2.transpose(1,0,3,2)
-    mycc.cc2 = False
-    t1a, t2a = mycc.update_amps(t1, t2, eris)
-    print(pyscflib.finger(t1a.array) - (-13.32050019680894-1.8825765910430254j))
-    print(pyscflib.finger(t2a.array) - (9.2521062044785189+29.999480274811873j))
-    mycc.cc2 = True
-    t1a, t2a = mycc.update_amps(t1, t2, eris)
-    print(pyscflib.finger(t1a.array) - (-13.32050019680894-1.8825765910430254j))
-    print(pyscflib.finger(t2a.array) - (-0.056223856104895858+0.025472249329733986j))
+    from pyscf.cc.rccsd import RCCSD as REFCCSD
 
     mol = gto.Mole()
     mol.atom = [
@@ -452,25 +371,22 @@ if __name__ == '__main__':
         [1 , (0. , 0.757  , 0.587)]]
     mol.basis = 'cc-pvdz'
     #mol.basis = '3-21G'
-    mol.verbose = 0
+    mol.verbose = 5
     mol.spin = 0
     mol.build()
     mf = scf.RHF(mol).run(conv_tol=1e-14)
     mycc = RCCSD(mf)
+    refcc = REFCCSD(mf)
     eris = mycc.ao2mo()
-    emp2, t1, t2 = mycc.init_amps(eris)
-    print(pyscflib.finger(t2.array) - 0.08551011863965133)
-    np.random.seed(1)
-    t1 = np.random.random(t1.shape)*.1
-    t2 = np.random.random(t2.shape)*.1
-    lib = mycc.lib
-    t1 = lib.tensor(t1)
-    t2 = lib.tensor(t2)
-    t2 = t2 + t2.transpose(1,0,3,2)
-    t1, t2 = mycc.update_amps(t1, t2, eris)
+    erisr = refcc.ao2mo()
+    _, t1, t2 = mycc.init_amps(eris)
+    _, t1r, t2r = refcc.init_amps(erisr)
 
-    print(pyscflib.finger(t1.array) - -0.019600587272652903)
-    print(pyscflib.finger(t2.array) - -0.012913260807189797)
+    t10, t20 = mycc.update_amps(t1, t2, eris)
+    t1r0, t2r0 = refcc.update_amps(t1r, t2r, erisr)
 
-    ecc, t1, t2 = mycc.kernel()
-    print(ecc - -0.21334324674165406)
+    mycc.kernel()
+    refcc.kernel()
+
+    print((t10-t1r0).norm())
+    print((t20-t2r0).norm())

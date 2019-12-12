@@ -16,6 +16,7 @@ from pyscf.pbc.mp.kmp2 import (get_frozen_mask, get_nocc, get_nmo,
                                padded_mo_coeff, padding_k_idx)
 from pyscf.pbc.cc import kccsd_rhf
 from pyscf.lib.parameters import LOOSE_ZERO_TOL, LARGE_DENOM
+from pyscf.pbc.lib import kpts_helper
 
 def energy(cc, t1, t2, eris):
     lib, symlib, log = eris.lib, eris.symlib, cc.log
@@ -32,7 +33,9 @@ def energy(cc, t1, t2, eris):
 class KRCCSD(rccsd.RCCSD):
 
     def __init__(self, mf, frozen=0, mo_coeff=None, mo_occ=None):
-        kccsd_rhf.RCCSD.__init__(self, mf, frozen, mo_coeff, mo_occ)
+        rccsd.RCCSD.__init__(self, mf, frozen, mo_coeff, mo_occ)
+        self.kpts = mf.kpts
+        self.khelper = kpts_helper.KptsHelper(mf.cell, mf.kpts)
         self.max_space = 20
         self._keys = self._keys.union(['max_space'])
         self.lib = sym
@@ -59,15 +62,14 @@ class KRCCSD(rccsd.RCCSD):
 
     def init_amps(self, eris):
         time0 = time.clock(), time.time()
-        log, lib = self.log, self.lib
+        log, lib, symlib = self.log, self.lib, self.symlib
         nocc = self.nocc
         nvir = self.nmo - nocc
         kpts = self.kpts
         nkpts = self.nkpts
         gvec = self._scf.cell.reciprocal_vectors()
-        dtype = eris.dtype
         sym1 = ['+-', [kpts,]*2, None, gvec]
-        t1 = lib.zeros([nocc,nvir], dtype, sym1)
+        t1 = lib.zeros([nocc,nvir], eris.dtype, sym1)
         t2 = eris.ovov.transpose(0,2,1,3).conj() / eris.eijab
         self.emp2  = 2*lib.einsum('ijab,iajb', t2, eris.ovov, symlib)
         self.emp2 -=   lib.einsum('ijab,ibja', t2, eris.ovov, symlib)
@@ -88,21 +90,27 @@ class _ChemistsERIs:
             mo_coeff = cc.mo_coeff
         cput0 = (time.clock(), time.time())
         log, lib, backend = cc.log, cc.lib, cc.backend
+        self.lib = lib
+        self.symlib = cc.symlib
         tensor, zeros = lib.tensor, lib.zeros
         nocc, nmo, nkpts = cc.nocc, cc.nmo, cc.nkpts
         nvir = nmo - nocc
         cell, kpts = cc._scf.cell, cc.kpts
         gvec = cell.reciprocal_vectors()
         sym1 = ['+-', [kpts,]*2, None, gvec]
-        sym2 = ['++--', [kpts,]*4, None, gvec]
+        sym2 = ['+-+-', [kpts,]*4, None, gvec]
         self.dtype = dtype = np.result_type(*cc.mo_coeff).char
         rank = getattr(backend, 'rank', 0)
         mo_coeff = self.mo_coeff = padded_mo_coeff(cc, mo_coeff)
         nonzero_opadding, nonzero_vpadding = padding_k_idx(cc, kind="split")
+        madelung = tools.madelung(cell, kpts)
         self.foo = zeros([nocc,nocc], dtype, sym1)
         self.fov = zeros([nocc,nvir], dtype, sym1)
         self.fvv = zeros([nvir,nvir], dtype, sym1)
         self.eia = zeros([nocc,nvir], 'float', sym1)
+        self._foo = zeros([nocc,nocc], dtype, sym1)
+        self._fvv = zeros([nvir,nvir], dtype, sym1)
+
 
         if rank ==0:
             dm = cc._scf.make_rdm1(cc.mo_coeff, cc.mo_occ)
@@ -116,12 +124,13 @@ class _ChemistsERIs:
             fvv = fock[:,nocc:,nocc:]
 
             mo_energy = [fock[k].diagonal().real for k in range(nkpts)]
-            madelung = tools.madelung(cell, kpts)
             mo_energy = [_adjust_occ(mo_e, nocc, -madelung)
                               for k, mo_e in enumerate(mo_energy)]
 
             mo_e_o = [e[:nocc] for e in mo_energy]
             mo_e_v = [e[nocc:] + cc.level_shift for e in mo_energy]
+            foo_ = np.asarray([np.diag(e) for e in mo_e_o])
+            fvv_ = np.asarray([np.diag(e) for e in mo_e_v])
             eia = np.zeros([nkpts,nocc,nvir])
             for ki in range(nkpts):
                 eia[ki] = _get_epq([0,nocc,ki,mo_e_o,nonzero_opadding],
@@ -131,11 +140,15 @@ class _ChemistsERIs:
             self.fov.write(range(fov.size), fov.ravel())
             self.fvv.write(range(fvv.size), fvv.ravel())
             self.eia.write(range(eia.size), eia.ravel())
+            self._foo.write(range(foo_.size), foo_.ravel())
+            self._fvv.write(range(fvv_.size), fvv_.ravel())
         else:
             self.foo.write([],[])
             self.fov.write([],[])
             self.fvv.write([],[])
             self.eia.write([],[])
+            self._foo.write([],[])
+            self._fvv.write([],[])
 
         self.oooo = zeros([nocc,nocc,nocc,nocc], dtype, sym2)
         self.ooov = zeros([nocc,nocc,nocc,nvir], dtype, sym2)
@@ -204,6 +217,7 @@ class _ChemistsERIs:
             self.ovvo.write(off*idx_ovvo.size+idx_ovvo, ovvo)
             self.ovvv.write(off*idx_ovvv.size+idx_ovvv, ovvv)
             self.vvvv.write(off*idx_vvvv.size+idx_vvvv, vvvv)
+            off = kp * nkpts**2 + kr * nkpts + kq
             self.eijab.write(off*idx_oovv.size+idx_oovv, eijab.ravel())
             log.debug1('_ERIS pqr %d', pqr)
 
@@ -250,4 +264,60 @@ def _get_epq(pindices,qindices,fac=[1.0,1.0],large_num=LARGE_DENOM):
 
 
 if __name__ == '__main__':
-    True
+    from pyscf.pbc import gto, scf, cc
+    import os
+    cell = gto.Cell()
+    cell.atom='''
+    C 0.000000000000   0.000000000000   0.000000000000
+    C 1.685068664391   1.685068664391   1.685068664391
+    '''
+    cell.basis = 'gth-szv'
+    cell.pseudo = 'gth-pade'
+    cell.a = '''
+    0.000000000, 3.370137329, 3.370137329
+    3.370137329, 0.000000000, 3.370137329
+    3.370137329, 3.370137329, 0.000000000'''
+    cell.unit = 'B'
+    cell.verbose = 5
+    cell.mesh = [5,5,5]
+    cell.build()
+
+    kpts = cell.make_kpts([1,1,3])
+    mf = scf.KRHF(cell,kpts, exxdiv=None)
+    chkfile = 'dmd_113.chk'
+    if os.path.isfile(chkfile):
+        mf.__dict__.update(scf.chkfile.load(chkfile, 'scf'))
+    else:
+        mf.chkfile = chkfile
+        mf.kernel()
+
+    mycc = KRCCSD(mf)
+    mycc.max_cycle=100
+    eris = mycc.ao2mo()
+    _, t1, t2 = mycc.init_amps(eris)
+    t10, t20 = mycc.update_amps(t1, t2, eris)
+
+    refcc = cc.KRCCSD(mf)
+
+    erisref = refcc.ao2mo()
+    _, t1r, t2r= refcc.init_amps(erisref)
+    t1r0, t2r0= refcc.update_amps(t1r, t2r, erisref)
+
+    print((eris.oooo.transpose(0,2,1,3)-erisref.oooo).norm())
+    print((eris.ooov.transpose(0,2,1,3)-erisref.ooov).norm())
+    print((eris.ovov.transpose(0,2,1,3)-erisref.oovv).norm())
+    print((eris.oovv.transpose(0,2,1,3)-erisref.ovov).norm())
+    print((eris.ovvo.transpose(2,0,3,1)-erisref.voov).norm())
+    print((eris.ovvv.transpose(2,0,3,1)-erisref.vovv).norm())
+    print((eris.vvvv.transpose(0,2,1,3)-erisref.vvvv).norm())
+
+    #print((eris.eijab-eijab).norm())
+    print((t2-t2r).norm())
+    print("t1", (t10-t1r0).norm())
+    print("t2", (t20-t2r0).norm())
+
+    #mycc.kernel()
+    ecc, t1r, t2r = refcc.kernel()
+    t1.array = t1r
+    t2.array = t2r
+    mycc.kernel(t1, t2)
