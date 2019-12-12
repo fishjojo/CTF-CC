@@ -33,8 +33,8 @@ def cc_Fov(t1, t2, eris):
 def Loo(t1, t2, eris):
     lib, symlib = eris.lib, eris.symlib
     Lki = cc_Foo(t1, t2, eris) + lib.einsum('kc,ic->ki',eris.fov, t1, symlib)
-    Lki += 2*lib.einsum('lcki,lc->ki', eris.ovoo, t1, symlib)
-    Lki -=   lib.einsum('kcli,lc->ki', eris.ovoo, t1, symlib)
+    Lki += 2*lib.einsum('kilc,lc->ki', eris.ooov, t1, symlib)
+    Lki -=   lib.einsum('likc,lc->ki', eris.ooov, t1, symlib)
     return Lki
 
 def Lvv(t1, t2, eris):
@@ -48,8 +48,9 @@ def Lvv(t1, t2, eris):
 
 def cc_Woooo(t1, t2, eris):
     lib, symlib = eris.lib, eris.symlib
-    Wklij  = lib.einsum('lcki,jc->klij', eris.ovoo, t1, symlib)
-    Wklij += lib.einsum('kclj,ic->klij', eris.ovoo, t1, symlib)
+    Wklij = lib.einsum('kilc,jc->klij', eris.ooov, t1, symlib)
+    Wklij += lib.einsum('ljkc,ic->klij', eris.ooov, t1, symlib)
+
     Wklij += lib.einsum('kcld,ijcd->klij', eris.ovov, t2, symlib)
     tmp    = lib.einsum('kcld,ic->kild', eris.ovov, t1, symlib)
     Wklij += lib.einsum('kild,jd->klij', tmp, t1, symlib)
@@ -66,7 +67,7 @@ def cc_Wvvvv(t1, t2, eris):
 def cc_Wvoov(t1, t2, eris):
     lib, symlib = eris.lib, eris.symlib
     Wakic  = lib.einsum('kcad,id->akic', eris.ovvv, t1, symlib)
-    Wakic -= lib.einsum('kcli,la->akic', eris.ovoo, t1, symlib)
+    Wakic -= lib.einsum('likc,la->akic', eris.ooov, t1, symlib)
     Wakic += eris.ovvo.transpose(2,0,3,1)
 
     Wakic -= 0.5*lib.einsum('ldkc,ilda->akic', eris.ovov, t2, symlib)
@@ -79,7 +80,7 @@ def cc_Wvoov(t1, t2, eris):
 def cc_Wvovo(t1, t2, eris):
     lib, symlib = eris.lib, eris.symlib
     Wakci  = lib.einsum('kdac,id->akci', eris.ovvv, t1, symlib)
-    Wakci -= lib.einsum('lcki,la->akci', eris.ovoo, t1, symlib)
+    Wakci -= lib.einsum('kilc,la->akci', eris.ooov, t1, symlib)
     Wakci += eris.oovv.transpose(2,0,3,1)
     Wakci -= 0.5*lib.einsum('lckd,ilda->akci', eris.ovov, t2, symlib)
     tmp    = lib.einsum('lckd,la->ackd', eris.ovov, t1)
@@ -89,7 +90,7 @@ def cc_Wvovo(t1, t2, eris):
 def Wooov(t1, t2, eris):
     lib, symlib = eris.lib, eris.symlib
     Wklid  = lib.einsum('ic,kcld->klid', t1, eris.ovov, symlib)
-    Wklid += eris.ovoo.transpose(2,0,3,1)
+    Wklid += eris.ooov.transpose(0,2,1,3)
     return Wklid
 
 def Wvovv(t1, t2, eris):
@@ -136,8 +137,8 @@ def Woooo(t1, t2, eris):
     Wklij  = lib.einsum('kcld,ijcd->klij', eris.ovov, t2, symlib)
     tmp    = lib.einsum('kcld,ic->kild', eris.ovov, t1, symlib)
     Wklij += lib.einsum('kild,jd->klij', tmp, t1, symlib)
-    Wklij += lib.einsum('ldki,jd->klij', eris.ovoo, t1, symlib)
-    Wklij += lib.einsum('kclj,ic->klij', eris.ovoo, t1, symlib)
+    Wklij += lib.einsum('kild,jd->klij', eris.ooov, t1, symlib)
+    Wklij += lib.einsum('ljkc,ic->klij', eris.ooov, t1, symlib)
     Wklij += eris.oooo.transpose(0,2,1,3)
     return Wklij
 
@@ -159,8 +160,8 @@ def Wvvvo(t1, t2, eris):
     Wabcj +=  -lib.einsum('ldac,ljbd->abcj', eris.ovvv, t2, symlib)
     Wabcj +=  -lib.einsum('lcad,ljdb->abcj', eris.ovvv, t2, symlib)
     Wabcj +=  -lib.einsum('kcbd,jkda->abcj', eris.ovvv, t2, symlib)
-    Wabcj +=   lib.einsum('kclj,lkba->abcj', eris.ovoo, t2, symlib)
-    tmp    =   lib.einsum('kclj,lb->kcbj', eris.ovoo, t1)
+    Wabcj +=   lib.einsum('ljkc,lkba->abcj', eris.ooov, t2, symlib)
+    tmp    =   lib.einsum('ljkc,lb->kcbj', eris.ooov, t1)
     Wabcj +=   lib.einsum('kcbj,ka->abcj', tmp, t1)
     Wabcj +=  -lib.einsum('kc,kjab->abcj', cc_Fov(t1, t2, eris), t2, symlib)
     Wabcj += eris.ovvv.transpose(3,1,2,0).conj()
@@ -173,13 +174,13 @@ def Wovoo(t1, t2, eris):
     Wkbij  =   lib.einsum('kbid,jd->kbij', W1ovov(t1, t2, eris), t1, symlib)
     Wkbij +=  -lib.einsum('klij,lb->kbij', Woooo(t1, t2, eris), t1, symlib)
     Wkbij +=   lib.einsum('kbcj,ic->kbij', W1ovvo(t1, t2, eris), t1, symlib)
-    Wkbij += 2*lib.einsum('ldki,ljdb->kbij', eris.ovoo, t2, symlib)
-    Wkbij +=  -lib.einsum('ldki,jldb->kbij', eris.ovoo, t2, symlib)
-    Wkbij +=  -lib.einsum('kdli,ljdb->kbij', eris.ovoo, t2, symlib)
+    Wkbij += 2*lib.einsum('ldki,ljdb->kbij', eris.ooov, t2, symlib)
+    Wkbij +=  -lib.einsum('ldki,jldb->kbij', eris.ooov, t2, symlib)
+    Wkbij +=  -lib.einsum('kdli,ljdb->kbij', eris.ooov, t2, symlib)
     Wkbij +=   lib.einsum('kcbd,jidc->kbij', eris.ovvv, t2, symlib)
     tmp    =   lib.einsum('kcbd,ic->kibd', eris.ovvv, t1, symlib)
     Wkbij +=   lib.einsum('kibd,jd->kbij', tmp, t1, symlib)
-    Wkbij +=  -lib.einsum('kclj,libc->kbij', eris.ovoo, t2, symlib)
+    Wkbij +=  -lib.einsum('ljkc,libc->kbij', eris.ooov, t2, symlib)
     Wkbij +=   lib.einsum('kc,ijcb->kbij', cc_Fov(t1, t2, eris), t2, symlib)
-    Wkbij += eris.ovoo.transpose(3,1,2,0).conj()
+    Wkbij += eris.ooov.transpose(1,3,0,2).conj()
     return Wkbij

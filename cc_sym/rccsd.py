@@ -21,15 +21,41 @@ from symtensor import sym
 
 # note MO integrals are treated in chemist's notation
 
+def kernel(mycc, eris, t1, t2):
+    if eris is None: eris = mycc.ao2mo(self.mo_coeff)
+    if t1 is None: t1, t2 = mycc.init_amps(eris)[1:]
+    max_cycle = mycc.max_cycle
+    tol = mycc.conv_tol
+    tolnormt = mycc.conv_tol_normt
+
+    log = mycc.log
+    cput1 = cput0 = (time.clock(), time.time())
+    nocc, nvir = t1.shape
+    eold = 0
+    eccsd = 0
+
+    conv = False
+    for istep in range(max_cycle):
+        t1new, t2new = mycc.update_amps(t1, t2, eris)
+        normt = (t1new-t1).norm() + (t2new-t2).norm()
+        t1, t2 = t1new, t2new
+        t1new = t2new = None
+        eold, eccsd = eccsd, mycc.energy(t1, t2, eris)
+        log.info('istep = %d  E(CCSD) = %.15g  dE = %.9g  norm(t1,t2) = %.6g',
+                istep, eccsd, eccsd - eold, normt)
+        cput1 = log.timer('CCSD iter', *cput1)
+        if abs(eccsd-eold) < tol and normt < tolnormt:
+            conv = True
+            break
+    log.timer('CCSD', *cput0)
+    return conv, eccsd, t1, t2
+
 def update_amps(cc, t1, t2, eris):
     # Ref: Hirata et al., J. Chem. Phys. 120, 2581 (2004) Eqs.(35)-(36)
     lib, symlib = eris.lib, eris.symlib
-    #fock = eris.fock
-
     fov = eris.fov.copy()
     foo = eris.foo.copy()
     fvv = eris.fvv.copy()
-
     Foo = imd.cc_Foo(t1,t2,eris)
     Fvv = imd.cc_Fvv(t1,t2,eris)
     Fov = imd.cc_Fov(t1,t2,eris)
@@ -144,7 +170,7 @@ class RCCSD(ccsd.CCSD):
         self.lib = sym
         self.symlib = None
         self.backend = sym.backend
-        self.log = self.backend.Logger(self, self.verbose)
+        self.log = self.backend.Logger(self.stdout, self.verbose)
 
 
     def dump_flags(self, verbose=None):
@@ -204,9 +230,7 @@ class RCCSD(ccsd.CCSD):
                 cctyp = 'CCSD'
                 self.cc2 = False
             self.converged, self.e_corr, self.t1, self.t2 = \
-                    ccsd.kernel(self, eris, t1, t2, max_cycle=self.max_cycle,
-                                tol=self.conv_tol, tolnormt=self.conv_tol_normt,
-                                verbose=self.verbose)
+                    kernel(self, eris, t1, t2)
             if self.converged:
                 self.log.info('%s converged', cctyp)
             else:
@@ -229,6 +253,7 @@ class _ChemistsERIs:
     def __init__(self, cc, mo_coeff=None):
         self.lib = lib = cc.lib
         self.symlib = cc.symlib
+        log = cc.log
         if mo_coeff is None:
             self.mo_coeff = mo_coeff = ccsd._mo_without_core(cc, cc.mo_coeff)
         else:
@@ -237,7 +262,7 @@ class _ChemistsERIs:
         fockao = cc._scf.get_hcore() + cc._scf.get_veff(cc.mol, dm)
         fock = reduce(np.dot, (mo_coeff.T, fockao, mo_coeff))
         mo_e = fock.diagonal().real
-        dtype = fock.dtype
+        self.dtype = dtype = fock.dtype
         nocc, nmo = cc.nocc, cc.nmo
         nvir = nmo - nocc
         self.foo = lib.tensor(fock[:nocc,:nocc])
@@ -247,16 +272,17 @@ class _ChemistsERIs:
         eijab = eia[:,None,:,None] + eia[None,:,None,:]
         self.eia = lib.tensor(eia)
         self.eijab = lib.tensor(eijab)
+        cput1 = cput0 = (time.clock(), time.time())
         eri1 = ao2mo.incore.full(cc._scf._eri, mo_coeff)
         eri1 = ao2mo.restore(1, eri1, nmo)
         self.oooo = lib.tensor(eri1[:nocc,:nocc,:nocc,:nocc].copy())
         self.ooov = lib.tensor(eri1[:nocc,:nocc,:nocc,nocc:].copy())
-        self.ovoo = lib.tensor(eri1[:nocc,nocc:,:nocc,:nocc].copy())
         self.ovov = lib.tensor(eri1[:nocc,nocc:,:nocc,nocc:].copy())
         self.oovv = lib.tensor(eri1[:nocc,:nocc,nocc:,nocc:].copy())
         self.ovvo = lib.tensor(eri1[:nocc,nocc:,nocc:,:nocc].copy())
         self.ovvv = lib.tensor(eri1[:nocc,nocc:,nocc:,nocc:].copy())
         self.vvvv = lib.tensor(eri1[nocc:,nocc:,nocc:,nocc:].copy())
+        cput1 = log.timer('ao2mo transformation', *cput1)
 
 class _IMDS:
     def __init__(self, cc):
@@ -430,7 +456,6 @@ if __name__ == '__main__':
     mol.spin = 0
     mol.build()
     mf = scf.RHF(mol).run(conv_tol=1e-14)
-
     mycc = RCCSD(mf)
     eris = mycc.ao2mo()
     emp2, t1, t2 = mycc.init_amps(eris)
@@ -438,6 +463,9 @@ if __name__ == '__main__':
     np.random.seed(1)
     t1 = np.random.random(t1.shape)*.1
     t2 = np.random.random(t2.shape)*.1
+    lib = mycc.lib
+    t1 = lib.tensor(t1)
+    t2 = lib.tensor(t2)
     t2 = t2 + t2.transpose(1,0,3,2)
     t1, t2 = mycc.update_amps(t1, t2, eris)
 

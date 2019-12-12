@@ -26,7 +26,7 @@ class CTFRCCSD(rccsd.RCCSD):
         self.lib = sym_ctf
         self.symlib = None
         self.backend = sym_ctf.backend
-        self.log = self.backend.Logger(self, self.verbose)
+        self.log = self.backend.Logger(self.stdout, self.verbose)
     def ao2mo(self, mo_coeff=None):
         return _ChemistsERIs_ctf(self, mo_coeff)
 
@@ -34,7 +34,7 @@ class CTFRCCSD(rccsd.RCCSD):
 class _ChemistsERIs_ctf:
     def __init__(self, cc, mo_coeff=None):
         log = cc.log
-        cput0 = (time.clock(), time.time())
+
         self.lib = lib = cc.lib
         self.symlib = cc.symlib
         astensor = cc.backend.astensor
@@ -51,7 +51,7 @@ class _ChemistsERIs_ctf:
         dm = cc._scf.make_rdm1(cc.mo_coeff, cc.mo_occ)
         fockao = cc._scf.get_hcore() + cc._scf.get_veff(cc.mol, dm)
         fock = reduce(np.dot, (mo_coeff.T, fockao, mo_coeff))
-        dtype = np.result_type(fock)
+        self.dtype = dtype = np.result_type(fock)
 
         self.foo = zeros([nocc,nocc], dtype)
         self.fov = zeros([nocc,nvir], dtype)
@@ -66,21 +66,22 @@ class _ChemistsERIs_ctf:
             self.fvv.write(range(nvir*nvir), fock[nocc:,nocc:].ravel())
             self.eia.write(range(nocc*nvir), eia.ravel())
         else:
-            self.foo.write_all([], [])
-            self.fov.write_all([], [])
-            self.fvv.write_all([], [])
-            self.eia.write_all([], [])
-
+            self.foo.write([], [])
+            self.fov.write([], [])
+            self.fvv.write([], [])
+            self.eia.write([], [])
+        cput0 = (time.clock(), time.time())
         eijab = self.eia.array.reshape(nocc,1,nvir,1) + self.eia.array.reshape(1,nocc,1,nvir)
         self.eijab = tensor(eijab)
+
         ppoo, ppov, ppvv = _make_ao_ints(cc.mol, mo_coeff, nocc, dtype)
+        log.timer('making ao integrals', *cput0)
         mo = astensor(mo_coeff)
         orbo, orbv = mo[:,:nocc], mo[:,nocc:]
 
         tmp = ctf.einsum('uvmn,ui->ivmn', ppoo, orbo.conj())
         oooo = ctf.einsum('ivmn,vj->ijmn', tmp, orbo)
         ooov = ctf.einsum('ivmn,va->mnia', tmp, orbv)
-        ovoo = ooov.transpose(2,3,0,1)
 
         tmp = ctf.einsum('uvma,vb->ubma', ppov, orbv)
         ovov = ctf.einsum('ubma,ui->ibma', tmp, orbo.conj())
@@ -96,12 +97,12 @@ class _ChemistsERIs_ctf:
 
         self.oooo = tensor(oooo)
         self.ooov = tensor(ooov)
-        self.ovoo = tensor(ovoo)
         self.ovov = tensor(ovov)
         self.oovv = tensor(oovv)
         self.ovvo = tensor(ovvo)
         self.ovvv = tensor(ovvv)
         self.vvvv = tensor(vvvv)
+        log.timer('ao2mo transformation', *cput0)
 
 def _make_ao_ints(mol, mo_coeff, nocc, dtype):
     NS = ctf.SYM.NS
@@ -174,6 +175,7 @@ if __name__ == '__main__':
     from pyscf import scf
     from pyscf import gto
     from pyscf.cc.rccsd_slow import RCCSD as REFCCSD
+    import os
 
     mol = gto.Mole()
     mol.atom = [
@@ -184,10 +186,28 @@ if __name__ == '__main__':
     mol.verbose = 0
     mol.spin = 0
     mol.build()
-    mf = scf.RHF(mol).run(conv_tol=1e-14)
+    mol.verbose=5
+    fn = 'molscf.chk'
+    if rank==0:
+        mf = scf.RHF(mol)
+        if os.path.isfile(fn):
+            mf.__dict__.update(scf.chkfile.load(fn,'scf'))
+        else:
+            #mf.max_cycle=2
+            mf.chkfile = fn
+            mf.kernel()
+    else:
+        mf = scf.RHF(mol)
+
+    mo_coeff  = comm.bcast(mf.mo_coeff, root=0)
+    mo_occ = comm.bcast(mf.mo_occ, root=0)
+    mf.mo_coeff = mo_coeff
+    mf.mo_occ = mo_occ
     mycc = CTFRCCSD(mf)
-    eris = mycc.ao2mo()
+    mycc.verbose=5
+    #mycc.max_cycle=1
+    mycc.kernel()
 
     from rccsd import RCCSD
     refcc = RCCSD(mf)
-    erisf = refcc.ao2mo()
+    refcc.kernel()
