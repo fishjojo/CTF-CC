@@ -107,7 +107,7 @@ class _ChemistsERIs:
         self.foo = zeros([nocc,nocc], dtype, sym1)
         self.fov = zeros([nocc,nvir], dtype, sym1)
         self.fvv = zeros([nvir,nvir], dtype, sym1)
-        self.eia = zeros([nocc,nvir], 'float', sym1)
+        self.eia = zeros([nocc,nvir], np.float64, sym1)
         self._foo = zeros([nocc,nocc], dtype, sym1)
         self._fvv = zeros([nvir,nvir], dtype, sym1)
 
@@ -157,7 +157,7 @@ class _ChemistsERIs:
         self.ovvo = zeros([nocc,nvir,nvir,nocc], dtype, sym2)
         self.ovvv = zeros([nocc,nvir,nvir,nvir], dtype, sym2)
         self.vvvv = zeros([nvir,nvir,nvir,nvir], dtype, sym2)
-        self.eijab = zeros([nocc,nocc,nvir,nvir], 'float', sym2)
+        self.eijab = zeros([nocc,nocc,nvir,nvir], np.float64, sym2)
 
         with_df = cc._scf.with_df
         fao2mo = cc._scf.with_df.ao2mo
