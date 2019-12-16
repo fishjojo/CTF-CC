@@ -27,6 +27,11 @@ class CTFRCCSD(rccsd.RCCSD):
         self.symlib = None
         self.backend = sym_ctf.backend
         self.log = self.backend.Logger(self.stdout, self.verbose)
+
+    @property
+    def _backend(self):
+        return 'ctf'
+
     def ao2mo(self, mo_coeff=None):
         return _ChemistsERIs_ctf(self, mo_coeff)
 

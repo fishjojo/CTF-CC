@@ -2,7 +2,7 @@
 
 
 '''
-Restricted CCSD with ctf
+Restricted Kpoint CCSD
 '''
 
 from functools import reduce
@@ -14,7 +14,7 @@ from symtensor import sym
 from symtensor.symlib import SYMLIB
 from pyscf.pbc.mp.kmp2 import (get_frozen_mask, get_nocc, get_nmo,
                                padded_mo_coeff, padding_k_idx)
-from pyscf.pbc.cc import kccsd_rhf
+from pyscf.pbc.cc.kccsd_rhf import _get_epq
 from pyscf.lib.parameters import LOOSE_ZERO_TOL, LARGE_DENOM
 from pyscf.pbc.lib import kpts_helper
 
@@ -47,6 +47,23 @@ class KRCCSD(rccsd.RCCSD):
     @property
     def nkpts(self):
         return len(self.kpts)
+
+    def vector_to_amplitudes(self, vec, nmo=None, nocc=None):
+        if nocc is None: nocc = self.nocc
+        if nmo is None: nmo = self.nmo
+        nvir = nmo - nocc
+        nkpts = self.nkpts
+        nov = nkpts * nocc * nvir
+        t1 = vec[:nov].reshape(nkpts,nocc,nvir)
+        t2 = vec[nov:].reshape(nkpts,nkpts,nkpts,nocc,nocc,nvir,nvir)
+
+        kpts = self.kpts
+        gvec = self._scf.cell.reciprocal_vectors()
+        sym1 = ['+-',[kpts,]*2, None, gvec]
+        sym2 = ['++--',[kpts,]*4, None, gvec]
+        t1  = self.lib.tensor(t1, sym1)
+        t2  = self.lib.tensor(t2, sym2)
+        return t1, t2
 
     def make_symlib(self):
         kpts = self.kpts
@@ -81,9 +98,8 @@ class KRCCSD(rccsd.RCCSD):
     def ao2mo(self, mo_coeff=None):
         return _ChemistsERIs(self, mo_coeff)
 
-
 class _ChemistsERIs:
-    def __init__(self, cc, mo_coeff=None,):
+    def __init__(self, cc, mo_coeff=None):
         from pyscf.pbc.cc.ccsd import _adjust_occ
         import pyscf.pbc.tools.pbc as tools
         if mo_coeff is None:
@@ -111,31 +127,30 @@ class _ChemistsERIs:
         self._foo = zeros([nocc,nocc], dtype, sym1)
         self._fvv = zeros([nvir,nvir], dtype, sym1)
 
+        dm = cc._scf.make_rdm1(cc.mo_coeff, cc.mo_occ)
 
+        with pyscflib.temporary_env(cc._scf, exxdiv=None):
+            fockao = cc._scf.get_hcore() + cc._scf.get_veff(cell, dm)
+        fock = np.asarray([reduce(np.dot, (mo.T.conj(), fockao[k], mo))
+                            for k, mo in enumerate(mo_coeff)])
+        foo = fock[:,:nocc,:nocc]
+        fov = fock[:,:nocc,nocc:]
+        fvv = fock[:,nocc:,nocc:]
+
+        mo_energy = [fock[k].diagonal().real for k in range(nkpts)]
+        mo_energy = [_adjust_occ(mo_e, nocc, -madelung)
+                          for k, mo_e in enumerate(mo_energy)]
+
+        mo_e_o = [e[:nocc] for e in mo_energy]
+        mo_e_v = [e[nocc:] + cc.level_shift for e in mo_energy]
+        foo_ = np.asarray([np.diag(e) for e in mo_e_o])
+        fvv_ = np.asarray([np.diag(e) for e in mo_e_v])
+        eia = np.zeros([nkpts,nocc,nvir])
+        for ki in range(nkpts):
+            eia[ki] = _get_epq([0,nocc,ki,mo_e_o,nonzero_opadding],
+                        [0,nvir,ki,mo_e_v,nonzero_vpadding],
+                        fac=[1.0,-1.0])
         if rank ==0:
-            dm = cc._scf.make_rdm1(cc.mo_coeff, cc.mo_occ)
-
-            with pyscflib.temporary_env(cc._scf, exxdiv=None):
-                fockao = cc._scf.get_hcore() + cc._scf.get_veff(cell, dm)
-            fock = np.asarray([reduce(np.dot, (mo.T.conj(), fockao[k], mo))
-                                for k, mo in enumerate(mo_coeff)])
-            foo = fock[:,:nocc,:nocc]
-            fov = fock[:,:nocc,nocc:]
-            fvv = fock[:,nocc:,nocc:]
-
-            mo_energy = [fock[k].diagonal().real for k in range(nkpts)]
-            mo_energy = [_adjust_occ(mo_e, nocc, -madelung)
-                              for k, mo_e in enumerate(mo_energy)]
-
-            mo_e_o = [e[:nocc] for e in mo_energy]
-            mo_e_v = [e[nocc:] + cc.level_shift for e in mo_energy]
-            foo_ = np.asarray([np.diag(e) for e in mo_e_o])
-            fvv_ = np.asarray([np.diag(e) for e in mo_e_v])
-            eia = np.zeros([nkpts,nocc,nvir])
-            for ki in range(nkpts):
-                eia[ki] = _get_epq([0,nocc,ki,mo_e_o,nonzero_opadding],
-                            [0,nvir,ki,mo_e_v,nonzero_vpadding],
-                            fac=[1.0,-1.0])
             self.foo.write(range(foo.size), foo.ravel())
             self.fov.write(range(fov.size), fov.ravel())
             self.fvv.write(range(fvv.size), fvv.ravel())
@@ -149,6 +164,13 @@ class _ChemistsERIs:
             self.eia.write([],[])
             self._foo.write([],[])
             self._fvv.write([],[])
+        oooo = [[]]
+        ooov = [[]]
+        oovv = [[]]
+        ovov = [[]]
+        voov = [[]]
+        vovv = [[]]
+        vvvv = [[]]
 
         self.oooo = zeros([nocc,nocc,nocc,nocc], dtype, sym2)
         self.ooov = zeros([nocc,nocc,nocc,nvir], dtype, sym2)
@@ -162,6 +184,7 @@ class _ChemistsERIs:
         with_df = cc._scf.with_df
         fao2mo = cc._scf.with_df.ao2mo
         kconserv = cc.khelper.kconserv
+        khelper = cc.khelper
 
         idx_oooo = np.arange(nocc*nocc*nocc*nocc)
         idx_ooov = np.arange(nocc*nocc*nocc*nvir)
@@ -171,7 +194,9 @@ class _ChemistsERIs:
         idx_ovvv = np.arange(nocc*nvir*nvir*nvir)
         idx_vvvv = np.arange(nvir*nvir*nvir*nvir)
 
-        tasks, ntasks = self.gen_eri_kpt_tasks(nkpts)
+        jobs = khelper.symm_map.keys()
+        tasks, ntasks = self.gen_tasks(jobs)
+
         for itask in range(ntasks):
             if itask >= len(tasks):
                 self.oooo.write([], [])
@@ -184,84 +209,57 @@ class _ChemistsERIs:
                 self.eijab.write([], [])
                 continue
 
-            pqr = tasks[itask]
-            kp = pqr // nkpts**2
-            kq, kr = (pqr % nkpts**2).__divmod__(nkpts)
-            ks = kconserv[kp,kq,kr]
-            eia = _get_epq([0,nocc,kp,mo_e_o,nonzero_opadding],
-                           [0,nvir,kq,mo_e_v,nonzero_vpadding],
-                           fac=[1.0,-1.0])
-            ejb = _get_epq([0,nocc,kr,mo_e_o,nonzero_opadding],
-                           [0,nvir,ks,mo_e_v,nonzero_vpadding],
-                           fac=[1.0,-1.0])
-            eijab = eia[:,None,:,None] + ejb[None,:,None,:]
+            ikp, ikq, ikr = tasks[itask]
+            iks = kconserv[ikp,ikq,ikr]
+            eri_kpt = fao2mo((mo_coeff[ikp],mo_coeff[ikq],mo_coeff[ikr],mo_coeff[iks]),
+                             (kpts[ikp],kpts[ikq],kpts[ikr],kpts[iks]), compact=False)
+            if dtype == np.float: eri_kpt = eri_kpt.real
+            eri_kpt = eri_kpt.reshape(nmo, nmo, nmo, nmo) / nkpts
 
-            eri_kpt = fao2mo((mo_coeff[kp],mo_coeff[kq],mo_coeff[kr],mo_coeff[ks]),
-                             (cc.kpts[kp],cc.kpts[kq],cc.kpts[kr],cc.kpts[ks]), compact=False)
+            done = np.zeros([nkpts,nkpts,nkpts])
+            for (kp, kq, kr) in khelper.symm_map[(ikp, ikq, ikr)]:
+                if done[kp,kq,kr]:
+                    self.oooo.write([], [])
+                    self.ooov.write([], [])
+                    self.ovov.write([], [])
+                    self.oovv.write([], [])
+                    self.ovvo.write([], [])
+                    self.ovvv.write([], [])
+                    self.vvvv.write([], [])
+                    self.eijab.write([], [])
+                    continue
+                eri_kpt_symm = khelper.transform_symm(eri_kpt, kp, kq, kr)
+                oooo = eri_kpt_symm[:nocc,:nocc,:nocc,:nocc].ravel()
+                ooov = eri_kpt_symm[:nocc,:nocc,:nocc,nocc:].ravel()
+                ovov = eri_kpt_symm[:nocc,nocc:,:nocc,nocc:].ravel()
+                oovv = eri_kpt_symm[:nocc,:nocc,nocc:,nocc:].ravel()
+                ovvo = eri_kpt_symm[:nocc,nocc:,nocc:,:nocc].ravel()
+                ovvv = eri_kpt_symm[:nocc,nocc:,nocc:,nocc:].ravel()
+                vvvv = eri_kpt_symm[nocc:,nocc:,nocc:,nocc:].ravel()
+                ks = kconserv[kp,kq,kr]
+                eia = _get_epq([0,nocc,kp,mo_e_o,nonzero_opadding],
+                               [0,nvir,kq,mo_e_v,nonzero_vpadding],
+                               fac=[1.0,-1.0])
+                ejb = _get_epq([0,nocc,kr,mo_e_o,nonzero_opadding],
+                               [0,nvir,ks,mo_e_v,nonzero_vpadding],
+                               fac=[1.0,-1.0])
+                eijab = eia[:,None,:,None] + ejb[None,:,None,:]
 
-            eri_kpt = eri_kpt.reshape(nmo,nmo,nmo,nmo) / nkpts
+                off = kp * nkpts**2 + kq * nkpts + kr
+                self.oooo.write(off*idx_oooo.size+idx_oooo, oooo)
+                self.ooov.write(off*idx_ooov.size+idx_ooov, ooov)
+                self.ovov.write(off*idx_ovov.size+idx_ovov, ovov)
+                self.oovv.write(off*idx_oovv.size+idx_oovv, oovv)
+                self.ovvo.write(off*idx_ovvo.size+idx_ovvo, ovvo)
+                self.ovvv.write(off*idx_ovvv.size+idx_ovvv, ovvv)
+                self.vvvv.write(off*idx_vvvv.size+idx_vvvv, vvvv)
+                off = kp * nkpts**2 + kr * nkpts + kq
+                self.eijab.write(off*idx_oovv.size+idx_oovv, eijab.ravel())
+                done[kp,kq,kr] = 1
+                log.debug1('_ERIS pqr %d', off)
 
-            oooo = eri_kpt[:nocc,:nocc,:nocc,:nocc].ravel()
-            ooov = eri_kpt[:nocc,:nocc,:nocc,nocc:].ravel()
-            ovov = eri_kpt[:nocc,nocc:,:nocc,nocc:].ravel()
-            oovv = eri_kpt[:nocc,:nocc,nocc:,nocc:].ravel()
-            ovvo = eri_kpt[:nocc,nocc:,nocc:,:nocc].ravel()
-            ovvv = eri_kpt[:nocc,nocc:,nocc:,nocc:].ravel()
-            vvvv = eri_kpt[nocc:,nocc:,nocc:,nocc:].ravel()
-
-            off = kp * nkpts**2 + kq * nkpts + kr
-            self.oooo.write(off*idx_oooo.size+idx_oooo, oooo)
-            self.ooov.write(off*idx_ooov.size+idx_ooov, ooov)
-            self.ovov.write(off*idx_ovov.size+idx_ovov, ovov)
-            self.oovv.write(off*idx_oovv.size+idx_oovv, oovv)
-            self.ovvo.write(off*idx_ovvo.size+idx_ovvo, ovvo)
-            self.ovvv.write(off*idx_ovvv.size+idx_ovvv, ovvv)
-            self.vvvv.write(off*idx_vvvv.size+idx_vvvv, vvvv)
-            off = kp * nkpts**2 + kr * nkpts + kq
-            self.eijab.write(off*idx_oovv.size+idx_oovv, eijab.ravel())
-            log.debug1('_ERIS pqr %d', pqr)
-
-    def gen_eri_kpt_tasks(self, nkpts):
-        tasks = range(nkpts**3)
-        ntasks = nkpts**3
-        return tasks, ntasks
-
-def _get_epq(pindices,qindices,fac=[1.0,1.0],large_num=LARGE_DENOM):
-    '''Create a denominator
-
-        fac[0]*e[kp,p0:p1] + fac[1]*e[kq,q0:q1]
-
-    where padded elements have been replaced by a large number.
-
-    Args:
-        pindices (5-list of object):
-            A list of p0, p1, kp, orbital values, and non-zero indicess for the first
-            denominator indices.
-        qindices (5-list of object):
-            A list of q0, q1, kq, orbital values, and non-zero indicess for the second
-            denominator element.
-        fac (3-list of float):
-            Factors to multiply the first and second denominator elements.
-        large_num (float):
-            Number to replace the padded elements.
-    '''
-    def get_idx(x0,x1,kx,n0_p):
-        return np.logical_and(n0_p[kx] >= x0, n0_p[kx] < x1)
-
-    assert(all([len(x) == 5 for x in [pindices,qindices]]))
-    p0,p1,kp,mo_e_p,nonzero_p = pindices
-    q0,q1,kq,mo_e_q,nonzero_q = qindices
-    fac_p, fac_q = fac
-
-    epq = large_num * np.ones((p1-p0,q1-q0), dtype=mo_e_p[0].dtype)
-    idxp = get_idx(p0,p1,kp,nonzero_p)
-    idxq = get_idx(q0,q1,kq,nonzero_q)
-    n0_ovp_pq = np.ix_(nonzero_p[kp][idxp], nonzero_q[kq][idxq])
-    epq[n0_ovp_pq] = pyscflib.direct_sum('p,q->pq', fac_p*mo_e_p[kp][p0:p1],
-                                               fac_q*mo_e_q[kq][q0:q1])[n0_ovp_pq]
-    return epq
-
-
+    def gen_tasks(self, jobs):
+        return jobs, len(jobs)
 
 if __name__ == '__main__':
     from pyscf.pbc import gto, scf, cc
@@ -318,6 +316,4 @@ if __name__ == '__main__':
 
     #mycc.kernel()
     ecc, t1r, t2r = refcc.kernel()
-    t1.array = t1r
-    t2.array = t2r
-    mycc.kernel(t1, t2)
+    mycc.kernel()

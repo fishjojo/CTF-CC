@@ -16,38 +16,50 @@ from pyscf import lib as pyscflib
 from pyscf import ao2mo
 from pyscf.cc import ccsd
 import rintermediates as imd
-
 from symtensor import sym
+from cc_sym.linalg_helper.diis import DIIS
 
 # note MO integrals are treated in chemist's notation
 
 def kernel(mycc, eris, t1, t2):
     if eris is None: eris = mycc.ao2mo(self.mo_coeff)
     if t1 is None: t1, t2 = mycc.init_amps(eris)[1:]
+    log = mycc.log
     max_cycle = mycc.max_cycle
     tol = mycc.conv_tol
     tolnormt = mycc.conv_tol_normt
-
-    log = mycc.log
+    if isinstance(mycc.diis, DIIS):
+        adiis = mycc.diis
+    elif mycc.diis:
+        adiis = DIIS(mycc)
+        adiis.space = mycc.diis_space
+    else:
+        adiis = None
     cput1 = cput0 = (time.clock(), time.time())
     nocc, nvir = t1.shape
     eold = 0
     eccsd = 0
-
     conv = False
     for istep in range(max_cycle):
         t1new, t2new = mycc.update_amps(t1, t2, eris)
         normt = (t1new-t1).norm() + (t2new-t2).norm()
+        if mycc.iterative_damping < 1.0:
+            alpha = mycc.iterative_damping
+            t1new = (1-alpha) * t1 + alpha * t1new
+            t2new *= alpha
+            t2new += (1-alpha) * t2
         t1, t2 = t1new, t2new
         t1new = t2new = None
+        t1, t2 = mycc.run_diis(t1, t2, istep, normt, eccsd-eold, adiis)
         eold, eccsd = eccsd, mycc.energy(t1, t2, eris)
-        log.info('istep = %d  E(CCSD) = %.15g  dE = %.9g  norm(t1,t2) = %.6g',
-                istep, eccsd, eccsd - eold, normt)
+        log.info('cycle = %d  E(CCSD) = %.15g  dE = %.9g  norm(t1,t2) = %.6g',
+                 istep+1, eccsd, eccsd - eold, normt)
         cput1 = log.timer('CCSD iter', *cput1)
         if abs(eccsd-eold) < tol and normt < tolnormt:
             conv = True
             break
     log.timer('CCSD', *cput0)
+
     return conv, eccsd, t1, t2
 
 def update_amps(cc, t1, t2, eris):
@@ -171,6 +183,25 @@ class RCCSD(ccsd.CCSD):
         self.symlib = None
         self.backend = sym.backend
         self.log = self.backend.Logger(self.stdout, self.verbose)
+
+    @property
+    def _backend(self):
+        return 'numpy'
+
+    def amplitudes_to_vector(self, t1, t2, out=None):
+        vector = self.backend.hstack((t1.array.ravel(), t2.array.ravel()))
+        return vector
+
+    def vector_to_amplitudes(self, vec, nmo=None, nocc=None):
+        if nocc is None: nocc = self.nocc
+        if nmo is None: nmo = self.nmo
+        nvir = nmo - nocc
+        nov = nocc * nvir
+        t1 = vec[:nov].reshape(nocc,nvir)
+        t2 = vec[nov:].reshape(nocc,nocc,nvir,nvir)
+        t1  = self.lib.tensor(t1)
+        t2  = self.lib.tensor(t2)
+        return t1, t2
 
 
     def dump_flags(self, verbose=None):

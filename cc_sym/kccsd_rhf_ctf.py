@@ -27,18 +27,20 @@ class KRCCSDCTF(kccsd_rhf.KRCCSD):
         self.symlib = SYMLIB('ctf')
         self.make_symlib()
 
+    @property
+    def _backend(self):
+        return 'ctf'
+
 
     def ao2mo(self, mo_coeff=None):
         return _ChemistsERIs(self, mo_coeff)
 
 
 class _ChemistsERIs(kccsd_rhf._ChemistsERIs):
-    def gen_eri_kpt_tasks(self, nkpts):
-        tasks = list(static_partition(range(nkpts**3)))
+    def gen_tasks(self, jobs):
+        tasks = list(static_partition(jobs))
         ntasks = max(comm.allgather(len(tasks)))
         return tasks, ntasks
-
-
 
 
 if __name__ == '__main__':
@@ -68,7 +70,6 @@ if __name__ == '__main__':
     else:
         mf.chkfile = chkfile
         mf.kernel()
-
     mycc = KRCCSDCTF(mf)
     mycc.max_cycle=100
     eris = mycc.ao2mo()
@@ -89,13 +90,8 @@ if __name__ == '__main__':
     print(np.linalg.norm(eris.ovvv.transpose(2,0,3,1).array.to_nparray()-erisref.vovv))
     print(np.linalg.norm(eris.vvvv.transpose(0,2,1,3).array.to_nparray()-erisref.vvvv))
 
-    #print((eris.eijab-eijab))
-
     print("t1", np.linalg.norm(t10.array.to_nparray()-t1r0))
     print("t2", np.linalg.norm(t20.array.to_nparray()-t2r0))
 
-    #mycc.kernel()
-    ecc, t1r, t2r = refcc.kernel()
-    t1.array = ctf.astensor(t1r)
-    t2.array = ctf.astensor(t2r)
-    mycc.kernel(t1, t2)
+    mycc.kernel()
+    refcc.kernel()
