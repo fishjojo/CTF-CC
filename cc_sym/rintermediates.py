@@ -152,7 +152,7 @@ def Wvvvv(t1, t2, eris):
     Wabcd -= lib.einsum('kcbd,ka->abcd', eris.ovvv, t1, symlib)
     return Wabcd
 
-def Wvvvo(t1, t2, eris):
+def Wvvvo(t1, t2, eris, Wvvvv=None):
     lib, symlib = eris.lib, eris.symlib
     Wabcj  =  -lib.einsum('alcj,lb->abcj', W1ovov(t1, t2, eris).transpose(1,0,3,2), t1, symlib)
     Wabcj +=  -lib.einsum('kbcj,ka->abcj', W1ovvo(t1, t2, eris), t1, symlib)
@@ -165,7 +165,8 @@ def Wvvvo(t1, t2, eris):
     Wabcj +=   lib.einsum('kcbj,ka->abcj', tmp, t1)
     Wabcj +=  -lib.einsum('kc,kjab->abcj', cc_Fov(t1, t2, eris), t2, symlib)
     Wabcj += eris.ovvv.transpose(3,1,2,0).conj()
-    Wvvvv = Wvvvv(t1, t2, eris)
+    if Wvvvv is None:
+        Wvvvv = Wvvvv(t1, t2, eris)
     Wabcj += lib.einsum('abcd,jd->abcj', Wvvvv, t1, symlib)
     return Wabcj
 
@@ -174,9 +175,9 @@ def Wovoo(t1, t2, eris):
     Wkbij  =   lib.einsum('kbid,jd->kbij', W1ovov(t1, t2, eris), t1, symlib)
     Wkbij +=  -lib.einsum('klij,lb->kbij', Woooo(t1, t2, eris), t1, symlib)
     Wkbij +=   lib.einsum('kbcj,ic->kbij', W1ovvo(t1, t2, eris), t1, symlib)
-    Wkbij += 2*lib.einsum('ldki,ljdb->kbij', eris.ooov, t2, symlib)
-    Wkbij +=  -lib.einsum('ldki,jldb->kbij', eris.ooov, t2, symlib)
-    Wkbij +=  -lib.einsum('kdli,ljdb->kbij', eris.ooov, t2, symlib)
+    Wkbij += 2*lib.einsum('kild,ljdb->kbij', eris.ooov, t2, symlib)
+    Wkbij +=  -lib.einsum('kild,jldb->kbij', eris.ooov, t2, symlib)
+    Wkbij +=  -lib.einsum('likd,ljdb->kbij', eris.ooov, t2, symlib)
     Wkbij +=   lib.einsum('kcbd,jidc->kbij', eris.ovvv, t2, symlib)
     tmp    =   lib.einsum('kcbd,ic->kibd', eris.ovvv, t1, symlib)
     Wkbij +=   lib.einsum('kibd,jd->kbij', tmp, t1, symlib)

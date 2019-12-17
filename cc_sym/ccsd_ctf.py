@@ -10,7 +10,7 @@ import time
 import numpy as np
 from pyscf.cc import ccsd
 from pyscf import lib as pyscflib
-from pyscf import ao2mo
+from pyscf import ao2mo, gto
 from pyscf.ao2mo import _ao2mo
 import rccsd
 import rintermediates as imd
