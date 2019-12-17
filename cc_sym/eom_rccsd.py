@@ -343,6 +343,7 @@ class _IMDS:
         self.made_ea_imds = False
         self._made_shared_2e = False
         self.log = cc.log
+        self.symlib = cc.symlib
 
     def _make_shared_1e(self):
         cput0 = (time.clock(), time.time())
