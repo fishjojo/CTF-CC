@@ -117,6 +117,7 @@ class _ChemistsERIs:
         sym2 = ['+-+-', [kpts,]*4, None, gvec]
         self.dtype = dtype = np.result_type(*cc.mo_coeff).char
         rank = getattr(backend, 'rank', 0)
+        comm = getattr(backend, 'comm', None)
         mo_coeff = self.mo_coeff = padded_mo_coeff(cc, mo_coeff)
         nonzero_opadding, nonzero_vpadding = padding_k_idx(cc, kind="split")
         madelung = tools.madelung(cell, kpts)
@@ -126,13 +127,15 @@ class _ChemistsERIs:
         self.eia = zeros([nocc,nvir], np.float64, sym1)
         self._foo = zeros([nocc,nocc], dtype, sym1)
         self._fvv = zeros([nvir,nvir], dtype, sym1)
-
-        dm = cc._scf.make_rdm1(cc.mo_coeff, cc.mo_occ)
-
-        with pyscflib.temporary_env(cc._scf, exxdiv=None):
-            fockao = cc._scf.get_hcore() + cc._scf.get_veff(cell, dm)
-        fock = np.asarray([reduce(np.dot, (mo.T.conj(), fockao[k], mo))
-                            for k, mo in enumerate(mo_coeff)])
+        fock = None
+        if rank==0:
+            dm = cc._scf.make_rdm1(cc.mo_coeff, cc.mo_occ)
+            with pyscflib.temporary_env(cc._scf, exxdiv=None):
+                fockao = cc._scf.get_hcore() + cc._scf.get_veff(cell, dm)
+            fock = np.asarray([reduce(np.dot, (mo.T.conj(), fockao[k], mo))
+                                for k, mo in enumerate(mo_coeff)])
+        if comm is not None:
+            fock = comm.bcast(fock, root=0)
         foo = fock[:,:nocc,:nocc]
         fov = fock[:,:nocc,nocc:]
         fvv = fock[:,nocc:,nocc:]
@@ -194,7 +197,7 @@ class _ChemistsERIs:
         idx_ovvv = np.arange(nocc*nvir*nvir*nvir)
         idx_vvvv = np.arange(nvir*nvir*nvir*nvir)
 
-        jobs = khelper.symm_map.keys()
+        jobs = list(khelper.symm_map.keys())
         tasks, ntasks = self.gen_tasks(jobs)
 
         for itask in range(ntasks):
