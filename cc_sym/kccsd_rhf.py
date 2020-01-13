@@ -136,6 +136,7 @@ class _ChemistsERIs:
                                 for k, mo in enumerate(mo_coeff)])
         if comm is not None:
             fock = comm.bcast(fock, root=0)
+        
         foo = fock[:,:nocc,:nocc]
         fov = fock[:,:nocc,nocc:]
         fvv = fock[:,nocc:,nocc:]
@@ -167,13 +168,6 @@ class _ChemistsERIs:
             self.eia.write([],[])
             self._foo.write([],[])
             self._fvv.write([],[])
-        oooo = [[]]
-        ooov = [[]]
-        oovv = [[]]
-        ovov = [[]]
-        voov = [[]]
-        vovv = [[]]
-        vvvv = [[]]
 
         self.oooo = zeros([nocc,nocc,nocc,nocc], dtype, sym2)
         self.ooov = zeros([nocc,nocc,nocc,nvir], dtype, sym2)
@@ -210,6 +204,10 @@ class _ChemistsERIs:
                 self.ovvv.write([], [])
                 self.vvvv.write([], [])
                 self.eijab.write([], [])
+                if hasattr(with_df, 'j3c'):
+                    # when GDF is used, make sure j3c integrals are still readed twice even if no task is assigned to the processor
+                    j3c = self.j3c.read([])
+                    j3c = self.j3c.read([])
                 continue
 
             ikp, ikq, ikr = tasks[itask]
