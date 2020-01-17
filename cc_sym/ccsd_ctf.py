@@ -52,12 +52,14 @@ class _ChemistsERIs_ctf:
             self.mo_coeff = mo_coeff = ccsd._mo_without_core(cc, cc.mo_coeff)
         else:
             self.mo_coeff = mo_coeff = ccsd._mo_without_core(cc, mo_coeff)
-
-        dm = cc._scf.make_rdm1(cc.mo_coeff, cc.mo_occ)
-        fockao = cc._scf.get_hcore() + cc._scf.get_veff(cc.mol, dm)
-        fock = reduce(np.dot, (mo_coeff.T, fockao, mo_coeff))
+        fock = None
+        if rank==0:
+            dm = cc._scf.make_rdm1(cc.mo_coeff, cc.mo_occ)
+            fockao = cc._scf.get_hcore() + cc._scf.get_veff(cc.mol, dm)
+            fock = reduce(np.dot, (mo_coeff.T, fockao, mo_coeff))
+        fock = comm.bcast(fock, root=0)
         self.dtype = dtype = np.result_type(fock)
-
+        
         self.foo = zeros([nocc,nocc], dtype)
         self.fov = zeros([nocc,nvir], dtype)
         self.fvv = zeros([nvir,nvir], dtype)
