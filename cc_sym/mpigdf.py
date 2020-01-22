@@ -137,13 +137,6 @@ def _make_j3c(mydf, cell, auxcell, kptij_lst):
     j3c_junk = backend.zeros([len(kptij_lst), nao**2, nfao], dtype=np.complex128)
     t1 = (time.clock(), time.time())
     idx_full = np.arange(len(kptij_lst)*nao**2*nfao).reshape(len(kptij_lst),nao**2,nfao)
-
-    kptis = kptij_lst[:,0]
-    kptjs = kptij_lst[:,1]
-    kpt_ji = kptjs - kptis
-    mydf.kpt_ji = kpt_ji
-    mydf.kptij_lst = kptij_lst
-
     if len(tasks)==0:
         backend.write(j3c_junk, [], [])
     else:
@@ -167,7 +160,8 @@ def _make_j3c(mydf, cell, auxcell, kptij_lst):
     kptis = kptij_lst[:,0]
     kptjs = kptij_lst[:,1]
     kpt_ji = kptjs - kptis
-    mydf.kpt_ji = kpt_ji
+    #mydf.kpt_ji = kpt_ji
+    mydf.kptij_lst = kptij_lst
     uniq_kpts, uniq_index, uniq_inverse = unique(kpt_ji)
 
     jobs = np.arange(len(uniq_kpts))
@@ -233,8 +227,8 @@ def _make_j3c(mydf, cell, auxcell, kptij_lst):
 
     for itask in range(ntasks):
         if itask >= len(tasks):
-            j3ctmp = j3c_junk.read([])
             j2c_ji = j2c.read([])
+            j3ctmp = j3c_junk.read([])
             j3c.write([],[])
             continue
         idx_ji = tasks[itask]
@@ -376,21 +370,22 @@ if __name__ == '__main__':
     mydf.build()
     mydf.dump_to_file('erimpi.int')
 
-    mf = scf.KRHF(cell, kpts)
-    mf.with_df = mydf # USING MPIGDF ERI FILE for SCF
-    mf.kernel()
+    if rank==0:
+        mf = scf.KRHF(cell, kpts)
+        mf.with_df = mydf # USING MPIGDF ERI FILE for SCF
+        mf.kernel()
 
-    mf= scf.KRHF(cell,kpts)
-    mf.with_df = df.GDF(cell,kpts) # USING SERIAL GDF ERI
-    mf.with_df.mesh = [5,5,5]
-    mf.kernel()
+        mf= scf.KRHF(cell,kpts)
+        mf.with_df = df.GDF(cell,kpts) # USING SERIAL GDF ERI
+        mf.with_df.mesh = [5,5,5]
+        mf.kernel()
 
+    comm.Barrier()
     nao, nkpts = cell.nao_nr(), len(kpts)
     mo_coeff = np.random.random([nkpts, nao, nao])
     k0, k1, k2, k3 = (0,1,1,0)
     eri_mo = mydf.ao2mo((mo_coeff[k0], mo_coeff[k1], mo_coeff[k2], mo_coeff[k3]), (kpts[k0], kpts[k1], kpts[k2], kpts[k3]), compact=False)
     eri_ao = mydf.get_eri((kpts[k0], kpts[k1], kpts[k2], kpts[k3]), compact=False)
-
 
     eri_mo2 = mf.with_df.ao2mo((mo_coeff[k0], mo_coeff[k1], mo_coeff[k2], mo_coeff[k3]), (kpts[k0], kpts[k1], kpts[k2], kpts[k3]), compact=False).reshape(nao,nao,nao,nao)
     eri_ao2 = mf.with_df.get_eri((kpts[k0], kpts[k1], kpts[k2], kpts[k3]), compact=False).reshape(nao,nao,nao,nao)
