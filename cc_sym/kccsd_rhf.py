@@ -17,6 +17,7 @@ from pyscf.pbc.mp.kmp2 import (get_frozen_mask, get_nocc, get_nmo,
 from pyscf.pbc.cc.kccsd_rhf import _get_epq
 from pyscf.lib.parameters import LOOSE_ZERO_TOL, LARGE_DENOM
 from pyscf.pbc.lib import kpts_helper
+import itertools
 
 def energy(cc, t1, t2, eris):
     lib, symlib, log = eris.lib, eris.symlib, cc.log
@@ -136,7 +137,7 @@ class _ChemistsERIs:
                                 for k, mo in enumerate(mo_coeff)])
         if comm is not None:
             fock = comm.bcast(fock, root=0)
-        
+
         foo = fock[:,:nocc,:nocc]
         fov = fock[:,:nocc,nocc:]
         fvv = fock[:,nocc:,nocc:]
@@ -193,42 +194,33 @@ class _ChemistsERIs:
 
         jobs = list(khelper.symm_map.keys())
         tasks, ntasks = self.gen_tasks(jobs)
+        nwrite = 0
+        for itask in tasks:
+            ikp, ikq, ikr = itask
+            pqr = np.asarray(khelper.symm_map[(ikp,ikq,ikr)])
+            nwrite += len(np.unique(pqr, axis=0))
 
+        comm = getattr(backend,'comm', None)
+        if comm is not None:
+            nwrite_max = max(comm.allgather(nwrite))
+        else:
+            nwrite_max = nwrite
+        write_count = 0
         for itask in range(ntasks):
             if itask >= len(tasks):
-                self.oooo.write([], [])
-                self.ooov.write([], [])
-                self.ovov.write([], [])
-                self.oovv.write([], [])
-                self.ovvo.write([], [])
-                self.ovvv.write([], [])
-                self.vvvv.write([], [])
-                self.eijab.write([], [])
-                if hasattr(with_df, 'j3c'):
-                    # when GDF is used, make sure j3c integrals are still readed twice even if no task is assigned to the processor
-                    j3c = self.j3c.read([])
-                    j3c = self.j3c.read([])
+                if hasattr(with_df,'j3c'):
+                    j3c = with_df.j3c.read([])
+                    j3c = with_df.j3c.read([])
                 continue
-
             ikp, ikq, ikr = tasks[itask]
             iks = kconserv[ikp,ikq,ikr]
             eri_kpt = fao2mo((mo_coeff[ikp],mo_coeff[ikq],mo_coeff[ikr],mo_coeff[iks]),
                              (kpts[ikp],kpts[ikq],kpts[ikr],kpts[iks]), compact=False)
             if dtype == np.float: eri_kpt = eri_kpt.real
             eri_kpt = eri_kpt.reshape(nmo, nmo, nmo, nmo) / nkpts
-
             done = np.zeros([nkpts,nkpts,nkpts])
             for (kp, kq, kr) in khelper.symm_map[(ikp, ikq, ikr)]:
-                if done[kp,kq,kr]:
-                    self.oooo.write([], [])
-                    self.ooov.write([], [])
-                    self.ovov.write([], [])
-                    self.oovv.write([], [])
-                    self.ovvo.write([], [])
-                    self.ovvv.write([], [])
-                    self.vvvv.write([], [])
-                    self.eijab.write([], [])
-                    continue
+                if done[kp,kq,kr]: continue
                 eri_kpt_symm = khelper.transform_symm(eri_kpt, kp, kq, kr)
                 oooo = eri_kpt_symm[:nocc,:nocc,:nocc,:nocc].ravel()
                 ooov = eri_kpt_symm[:nocc,:nocc,:nocc,nocc:].ravel()
@@ -257,7 +249,18 @@ class _ChemistsERIs:
                 off = kp * nkpts**2 + kr * nkpts + kq
                 self.eijab.write(off*idx_oovv.size+idx_oovv, eijab.ravel())
                 done[kp,kq,kr] = 1
+                write_count += 1
                 log.debug1('_ERIS pqr %d', off)
+
+        for i in range(nwrite_max-write_count):
+            self.oooo.write([], [])
+            self.ooov.write([], [])
+            self.ovov.write([], [])
+            self.oovv.write([], [])
+            self.ovvo.write([], [])
+            self.ovvv.write([], [])
+            self.vvvv.write([], [])
+            self.eijab.write([], [])
 
     def gen_tasks(self, jobs):
         return jobs, len(jobs)
@@ -277,7 +280,7 @@ if __name__ == '__main__':
     3.370137329, 0.000000000, 3.370137329
     3.370137329, 3.370137329, 0.000000000'''
     cell.unit = 'B'
-    cell.verbose = 5
+    cell.verbose = 0
     cell.mesh = [5,5,5]
     cell.build()
 
@@ -293,6 +296,7 @@ if __name__ == '__main__':
     mycc = KRCCSD(mf)
     mycc.max_cycle=100
     eris = mycc.ao2mo()
+
     _, t1, t2 = mycc.init_amps(eris)
     t10, t20 = mycc.update_amps(t1, t2, eris)
 
