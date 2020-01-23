@@ -51,7 +51,7 @@ def ao2mo(mydf, mo_coeffs, kpts=None,
 
     klL = mydf.j3c.read(klid).reshape(nao,nao,naux)
     if kldagger:
-        klL = klL.tranpose(1,0,2).conj()
+        klL = klL.transpose(1,0,2).conj()
 
     pvL = np.dot(mo_coeffs[0].conj().T, ijL.transpose(1,0,2))
     pqL = np.dot(mo_coeffs[1].T, pvL).transpose(1,0,2)
@@ -88,7 +88,7 @@ def get_eri(mydf, kpts=None,
 
     klL = mydf.j3c.read(klid).reshape(nao,nao,naux)
     if kldagger:
-        klL = klL.tranpose(1,0,2).conj()
+        klL = klL.transpose(1,0,2).conj()
 
     eri = np.dot(ijL,klL.transpose(0,2,1))
     return eri
@@ -160,7 +160,6 @@ def _make_j3c(mydf, cell, auxcell, kptij_lst):
     kptis = kptij_lst[:,0]
     kptjs = kptij_lst[:,1]
     kpt_ji = kptjs - kptis
-    #mydf.kpt_ji = kpt_ji
     mydf.kptij_lst = kptij_lst
     uniq_kpts, uniq_index, uniq_inverse = unique(kpt_ji)
 
@@ -174,6 +173,7 @@ def _make_j3c(mydf, cell, auxcell, kptij_lst):
     idx_full = np.arange(j2c.size).reshape(j2c.shape)
 
     def cholesky_decomposed_metric(j2c_kptij):
+        #FIXME j2c translational symmetry and time reversal symmetry
         j2c_negative = None
         try:
             j2c_kptij = scipy.linalg.cholesky(j2c_kptij, lower=True)
@@ -182,13 +182,16 @@ def _make_j3c(mydf, cell, auxcell, kptij_lst):
             w, v = scipy.linalg.eigh(j2c_kptij)
             log.debug('cond = %.4g, drop %d bfns',
                       w[-1]/w[0], np.count_nonzero(w<mydf.linear_dep_threshold))
-            v1 = v[:,w>mydf.linear_dep_threshold].conj().T
-            v1 /= np.sqrt(w[w>mydf.linear_dep_threshold]).reshape(-1,1)
+            v1 = np.zeros(v.T.shape, dtype=v.dtype)
+            v1[w>mydf.linear_dep_threshold,:] = v[:,w>mydf.linear_dep_threshold].conj().T
+            v1[w>mydf.linear_dep_threshold,:] /= np.sqrt(w[w>mydf.linear_dep_threshold]).reshape(-1,1)
             j2c_kptij = v1
             if cell.dimension == 2 and cell.low_dim_ft_type != 'inf_vacuum':
                 idx = np.where(w < -mydf.linear_dep_threshold)[0]
                 if len(idx) > 0:
-                    j2c_negative = (v[:,idx]/np.sqrt(-w[idx])).conj().T
+                    j2c_negative = np.zeros(v1.shape, dtype=v1.dtype)
+                    j2c_negative[idx,:] = (v[:,idx]/np.sqrt(-w[idx])).conj().T
+
             w = v = None
             j2ctag = 'eig'
         return j2c_kptij, j2c_negative, j2ctag
