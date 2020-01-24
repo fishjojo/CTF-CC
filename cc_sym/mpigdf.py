@@ -172,8 +172,16 @@ def _make_j3c(mydf, cell, auxcell, kptij_lst):
     j2c  = backend.zeros([len(uniq_kpts),naux,naux], dtype=np.complex128)
     idx_full = np.arange(j2c.size).reshape(j2c.shape)
 
+    a = cell.lattice_vectors() / (2*np.pi)
+    def kconserve_indices(kpt):
+        '''search which (kpts+kpt) satisfies momentum conservation'''
+        kdif = np.einsum('wx,ix->wi', a, uniq_kpts + kpt)
+        kdif_int = np.rint(kdif)
+        mask = np.einsum('wi->i', abs(kdif - kdif_int)) < KPT_DIFF_TOL
+        uniq_kptji_ids = np.where(mask)[0]
+        return uniq_kptji_ids
+
     def cholesky_decomposed_metric(j2c_kptij):
-        #FIXME j2c translational symmetry and time reversal symmetry
         j2c_negative = None
         try:
             j2c_kptij = scipy.linalg.cholesky(j2c_kptij, lower=True)
@@ -239,8 +247,15 @@ def _make_j3c(mydf, cell, auxcell, kptij_lst):
         idxi, idxj = member(kpti, mydf.kpts), member(kptj, mydf.kpts)
         uniq_idx = uniq_inverse[idx_ji]
         kpt = uniq_kpts[uniq_idx]
-        j2cidx = idx_j2c[uniq_idx].ravel()
+        id_eq = kconserve_indices(-kpt)
+        id_conj = kconserve_indices(kpt)
+        id_conj = np.asarray([i for i in id_conj if i not in id_eq], dtype=int)
+        id_full = np.hstack((id_eq, id_conj))
+        map_id, conj = min(id_full), np.argmin(id_full) >=len(id_eq)
+        j2cidx = idx_j2c[map_id].ravel()
         j2c_ji = j2c.read(j2cidx).reshape(naux, naux) # read to be added
+        j2c_ji, j2c_negative, j2ctag = cholesky_decomposed_metric(j2c_ji)
+        if conj: j2c_ji = j2c_ji.conj()
         shls_slice= (auxcell.nbas, fused_cell.nbas)
         Gaux = ft_ao.ft_ao(fused_cell, Gv, shls_slice, b, gxyz, Gvbase, kpt)
         wcoulG = mydf.weighted_coulG(kpt, False, mesh)
@@ -256,8 +271,6 @@ def _make_j3c(mydf, cell, auxcell, kptij_lst):
 
         aoao = ft_ao._ft_aopair_kpts(cell, Gv, None, 's1', b, gxyz, Gvbase, kpt, kptj)[0].reshape(len(Gv),-1)
         j3ctmp[naux:] -= np.dot(Gaux.T.conj(), aoao)
-
-        j2c_ji, j2c_negative, j2ctag = cholesky_decomposed_metric(j2c_ji)
         j3ctmp = fuse(j3ctmp)
         if j2ctag == 'CD':
             v = scipy.linalg.solve_triangular(j2c_ji, j3ctmp, lower=True, overwrite_b=True)
@@ -284,6 +297,7 @@ class MPIGDF(df.GDF):
         self.verbose = 5
         self.j3c = None
         self.log = self.backend.Logger(self.stdout, self.verbose)
+        self.kptij_lst = None
         df.GDF.__init__(self, cell, kpts)
         #del self._cderi_to_save
 
@@ -371,10 +385,10 @@ if __name__ == '__main__':
     mydf = MPIGDF(cell, kpts, backend='ctf')
     mydf.mesh = [5,5,5]
     mydf.build()
-    mydf.dump_to_file('erimpi.int')
 
     if rank==0:
         mf = scf.KRHF(cell, kpts)
+        mydf.dump_to_file('erimpi.int')
         mf.with_df = mydf # USING MPIGDF ERI FILE for SCF
         mf.kernel()
 
@@ -386,12 +400,15 @@ if __name__ == '__main__':
     comm.Barrier()
     nao, nkpts = cell.nao_nr(), len(kpts)
     mo_coeff = np.random.random([nkpts, nao, nao])
-    k0, k1, k2, k3 = (0,1,1,0)
-    eri_mo = mydf.ao2mo((mo_coeff[k0], mo_coeff[k1], mo_coeff[k2], mo_coeff[k3]), (kpts[k0], kpts[k1], kpts[k2], kpts[k3]), compact=False)
-    eri_ao = mydf.get_eri((kpts[k0], kpts[k1], kpts[k2], kpts[k3]), compact=False)
-
-    eri_mo2 = mf.with_df.ao2mo((mo_coeff[k0], mo_coeff[k1], mo_coeff[k2], mo_coeff[k3]), (kpts[k0], kpts[k1], kpts[k2], kpts[k3]), compact=False).reshape(nao,nao,nao,nao)
-    eri_ao2 = mf.with_df.get_eri((kpts[k0], kpts[k1], kpts[k2], kpts[k3]), compact=False).reshape(nao,nao,nao,nao)
-
-    print(np.linalg.norm(eri_mo-eri_mo2))
-    print(np.linalg.norm(eri_ao-eri_ao2))
+    from pyscf.pbc.lib import kpts_helper
+    kconserv = kpts_helper.get_kconserv(cell, kpts)
+    for k0 in range(nkpts):
+        for k1 in range(nkpts):
+            for k2 in range(nkpts):
+                k3 = kconserv[k0,k1,k2]
+                eri_mo = mydf.ao2mo((mo_coeff[k0], mo_coeff[k1], mo_coeff[k2], mo_coeff[k3]), (kpts[k0], kpts[k1], kpts[k2], kpts[k3]), compact=False)
+                eri_ao = mydf.get_eri((kpts[k0], kpts[k1], kpts[k2], kpts[k3]), compact=False)
+                eri_mo2 = mf.with_df.ao2mo((mo_coeff[k0], mo_coeff[k1], mo_coeff[k2], mo_coeff[k3]), (kpts[k0], kpts[k1], kpts[k2], kpts[k3]), compact=False).reshape(nao,nao,nao,nao)
+                eri_ao2 = mf.with_df.get_eri((kpts[k0], kpts[k1], kpts[k2], kpts[k3]), compact=False).reshape(nao,nao,nao,nao)
+                print(k0,k1,k2,k3)
+                print(np.linalg.norm(eri_ao-eri_ao2), np.linalg.norm(eri_mo-eri_mo2))
