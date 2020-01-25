@@ -137,13 +137,16 @@ def _make_j3c(mydf, cell, auxcell, kptij_lst):
     j3c_junk = backend.zeros([len(kptij_lst), nao**2, nfao], dtype=np.complex128)
     t1 = (time.clock(), time.time())
     idx_full = np.arange(len(kptij_lst)*nao**2*nfao).reshape(len(kptij_lst),nao**2,nfao)
-    if len(tasks)==0:
-        backend.write(j3c_junk, [], [])
-    else:
-        shls_slice = (0, cell.nbas, 0, cell.nbas, tasks[0], tasks[-1]+1)
-        bstart, bend = fused_cell.ao_loc_nr()[tasks[0]], fused_cell.ao_loc_nr()[tasks[-1]+1]
+
+    for itask in range(ntasks):
+        if itask >= len(tasks):
+            backend.write(j3c_junk, [], [])
+            continue
+        shls_slice = (0, cell.nbas, 0, cell.nbas, tasks[itask], tasks[itask]+1)
+        bstart, bend = fused_cell.ao_loc_nr()[tasks[itask]], fused_cell.ao_loc_nr()[tasks[itask]+1]
         idx = idx_full[:,:,bstart:bend].ravel()
         tmp = df.incore.aux_e2(cell, fused_cell, intor='int3c2e', aosym='s2', kptij_lst=kptij_lst, shls_slice=shls_slice)
+        print("rank=%i, j3c_junk size=%i"%(rank, idx.size))
         nao_pair = nao**2
         if tmp.shape[-2] != nao_pair and tmp.ndim == 2:
             tmp = pyscflib.unpack_tril(tmp, axis=0).reshape(nao_pair,-1)
