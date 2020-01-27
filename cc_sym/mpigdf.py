@@ -136,7 +136,6 @@ def _make_j3c(mydf, cell, auxcell, kptij_lst):
     ntasks = max(comm.allgather(len(tasks)))
     j3c_junk = backend.zeros([len(kptij_lst), nao**2, nfao], dtype=np.complex128)
     t1 = (time.clock(), time.time())
-    idx_full = np.arange(len(kptij_lst)*nao**2*nfao).reshape(len(kptij_lst),nao**2,nfao)
 
     for itask in range(ntasks):
         if itask >= len(tasks):
@@ -144,8 +143,11 @@ def _make_j3c(mydf, cell, auxcell, kptij_lst):
             continue
         shls_slice = (0, cell.nbas, 0, cell.nbas, tasks[itask], tasks[itask]+1)
         bstart, bend = fused_cell.ao_loc_nr()[tasks[itask]], fused_cell.ao_loc_nr()[tasks[itask]+1]
-        idx = idx_full[:,:,bstart:bend].ravel()
+        idx = np.arange(len(kptij_lst)*nao**2) * nfao
+        idx = idx[:,None] + np.arange(bstart,bend)[None,:]
+        idx = idx.ravel()
         tmp = df.incore.aux_e2(cell, fused_cell, intor='int3c2e', aosym='s2', kptij_lst=kptij_lst, shls_slice=shls_slice)
+        
         print("rank=%i, j3c_junk size=%i"%(rank, idx.size))
         nao_pair = nao**2
         if tmp.shape[-2] != nao_pair and tmp.ndim == 2:
@@ -173,7 +175,6 @@ def _make_j3c(mydf, cell, auxcell, kptij_lst):
     blksize = max(2048, int(max_memory*.5e6/16/fused_cell.nao_nr()))
     log.debug2('max_memory %s (MB)  blocksize %s', max_memory, blksize)
     j2c  = backend.zeros([len(uniq_kpts),naux,naux], dtype=np.complex128)
-    idx_full = np.arange(j2c.size).reshape(j2c.shape)
 
     a = cell.lattice_vectors() / (2*np.pi)
     def kconserve_indices(kpt):
@@ -225,15 +226,13 @@ def _make_j3c(mydf, cell, auxcell, kptij_lst):
                 j2ctmp[:naux,naux:] = j2ctmp[naux:,:naux].T.conj()
 
         tmp = fuse(fuse(j2ctmp).T).T
-        idx = idx_full[k].ravel()
+        idx = k * naux**2 + np.arange(naux**2)
         j2c.write(idx, tmp.ravel())
+        j2ctmp = tmp = None
 
     coulG = None
     t1 = log.timer('j2c', *t1)
 
-    idx_fao = np.arange(len(kpt_ji)*nao**2*nfao).reshape(len(kpt_ji), nao**2, nfao)
-    idx_aux = np.arange(len(kpt_ji)*nao**2*naux).reshape(len(kpt_ji), nao, nao, naux)
-    idx_j2c = np.arange(j2c.size).reshape(j2c.shape)
     j3c = ctf.zeros([len(kpt_ji),nao,nao,naux], dtype=np.complex128)
     jobs = np.arange(len(kpt_ji))
     tasks = list(static_partition(jobs))
@@ -255,7 +254,7 @@ def _make_j3c(mydf, cell, auxcell, kptij_lst):
         id_conj = np.asarray([i for i in id_conj if i not in id_eq], dtype=int)
         id_full = np.hstack((id_eq, id_conj))
         map_id, conj = min(id_full), np.argmin(id_full) >=len(id_eq)
-        j2cidx = idx_j2c[map_id].ravel()
+        j2cidx = map_id * naux**2 + np.arange(naux**2)
         j2c_ji = j2c.read(j2cidx).reshape(naux, naux) # read to be added
         j2c_ji, j2c_negative, j2ctag = cholesky_decomposed_metric(j2c_ji)
         if conj: j2c_ji = j2c_ji.conj()
@@ -263,7 +262,7 @@ def _make_j3c(mydf, cell, auxcell, kptij_lst):
         Gaux = ft_ao.ft_ao(fused_cell, Gv, shls_slice, b, gxyz, Gvbase, kpt)
         wcoulG = mydf.weighted_coulG(kpt, False, mesh)
         Gaux *= wcoulG.reshape(-1,1)
-        j3c_id = idx_fao[idx_ji,:,:].ravel()
+        j3c_id = idx_ji * nao**2*nfao + np.arange(nao**2*nfao)
         j3ctmp = j3c_junk.read(j3c_id).reshape(nao**2, fused_cell.nao_nr()).T
         if is_zero(kpt):  # kpti == kptj
             if cell.dimension == 3:
@@ -280,7 +279,7 @@ def _make_j3c(mydf, cell, auxcell, kptij_lst):
         else:
             v = np.dot(j2c_ji, j3ctmp)
         v = v.T.reshape(nao,nao,naux)
-        j3c_id = idx_aux[idx_ji,:,:,:].ravel()
+        j3c_id = idx_ji * nao**2*naux + np.arange(nao**2*naux)
         j3c.write(j3c_id, v.ravel())
 
     mydf.j3c = j3c
