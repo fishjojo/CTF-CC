@@ -9,7 +9,7 @@ from functools import reduce
 import time
 import numpy as np
 from pyscf import lib as pyscflib
-import rccsd
+from cc_sym import rccsd
 from symtensor import sym
 from symtensor.symlib import SYMLIB
 from pyscf.pbc.mp.kmp2 import (get_frozen_mask, get_nocc, get_nmo,

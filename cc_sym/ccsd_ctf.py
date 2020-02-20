@@ -12,8 +12,7 @@ from pyscf.cc import ccsd
 from pyscf import lib as pyscflib
 from pyscf import ao2mo, gto
 from pyscf.ao2mo import _ao2mo
-import rccsd
-import rintermediates as imd
+from sym_cc import rccsd
 from symtensor import sym_ctf
 from symtensor.backend.ctf_funclib import static_partition, rank, comm, size
 import ctf
@@ -59,7 +58,7 @@ class _ChemistsERIs_ctf:
             fock = reduce(np.dot, (mo_coeff.T, fockao, mo_coeff))
         fock = comm.bcast(fock, root=0)
         self.dtype = dtype = np.result_type(fock)
-        
+
         self.foo = zeros([nocc,nocc], dtype)
         self.fov = zeros([nocc,nvir], dtype)
         self.fvv = zeros([nvir,nvir], dtype)

@@ -15,7 +15,7 @@ import numpy as np
 from pyscf import lib as pyscflib
 from pyscf import ao2mo
 from pyscf.cc import ccsd
-import rintermediates as imd
+import cc_sym.rintermediates as imd
 from symtensor import sym
 from cc_sym.linalg_helper.diis import DIIS
 

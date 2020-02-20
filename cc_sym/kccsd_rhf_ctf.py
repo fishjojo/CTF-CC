@@ -3,12 +3,11 @@
 import time
 import numpy as np
 from pyscf import lib as pyscflib
-import rccsd
 from symtensor import sym_ctf
 from symtensor.symlib import SYMLIB
 from pyscf.pbc.cc import kccsd_rhf
 from pyscf.pbc.lib import kpts_helper
-import kccsd_rhf
+from cc_sym import kccsd_rhf, rccsd
 from symtensor.backend.ctf_funclib import static_partition, rank, comm, size
 import ctf
 

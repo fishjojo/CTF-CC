@@ -2,7 +2,7 @@ from pyscf.cc.eom_rccsd import EOM
 from pyscf import lib as pyscflib
 import numpy as np
 import time
-import rintermediates as imd
+import cc_sym.rintermediates as imd
 
 def kernel(eom, nroots=1, koopmans=True, guess=None, left=False,
            eris=None, imds=None, partition=None, kptlist=None,

@@ -1,4 +1,4 @@
-import eom_rccsd
+from cc_sym import eom_rccsd
 import numpy as np
 import time
 from pyscf.pbc.mp.kmp2 import padding_k_idx
