@@ -12,7 +12,7 @@ from pyscf.cc import ccsd
 from pyscf import lib as pyscflib
 from pyscf import ao2mo, gto
 from pyscf.ao2mo import _ao2mo
-from sym_cc import rccsd
+from cc_cym import rccsd
 from symtensor import sym_ctf
 from symtensor.backend.ctf_funclib import static_partition, rank, comm, size
 import ctf
