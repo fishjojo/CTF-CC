@@ -3,13 +3,22 @@ from pyscf import lib as pyscflib
 import numpy as np
 import time
 import cc_sym.rintermediates as imd
+import ctf
+from cc_sym import rccsd
+import symtensor.sym_ctf as lib
+
+rank = rccsd.rank
+comm = rccsd.comm
+size = rccsd.size
+tensor = lib.tensor
+Logger = rccsd.Logger
 
 def kernel(eom, nroots=1, koopmans=True, guess=None, left=False,
            eris=None, imds=None, partition=None, kptlist=None,
            dtype=None, **kwargs):
 
     cput0 = (time.clock(), time.time())
-    log = eom.log
+    log = Logger(eom.stdout, eom.verbose)
     eom.dump_flags()
 
     if imds is None:
@@ -39,7 +48,7 @@ def kernel(eom, nroots=1, koopmans=True, guess=None, left=False,
     return conv, evals, evecs
 
 def amplitudes_to_vector(eom, r1, r2):
-    vector = eom.backend.hstack((r1.array.ravel(), r2.array.ravel()))
+    vector = ctf.hstack((r1.array.ravel(), r2.array.ravel()))
     return vector
 
 def vector_to_amplitudes_ip(eom, vector):
@@ -47,8 +56,8 @@ def vector_to_amplitudes_ip(eom, vector):
     nvir = eom.nmo - nocc
     r1 = vector[:nocc].copy()
     r2 = vector[nocc:].copy().reshape(nocc,nocc,nvir)
-    r1 = eom.lib.tensor(r1)
-    r2 = eom.lib.tensor(r2)
+    r1 = tensor(r1)
+    r2 = tensor(r2)
     return [r1,r2]
 
 def vector_to_amplitudes_ea(eom, vector):
@@ -56,55 +65,52 @@ def vector_to_amplitudes_ea(eom, vector):
     nvir = eom.nmo - nocc
     r1 = vector[:nvir].copy()
     r2 = vector[nvir:].copy().reshape(nocc,nvir,nvir)
-    r1 = eom.lib.tensor(r1)
-    r2 = eom.lib.tensor(r2)
+    r1 = tensor(r1)
+    r2 = tensor(r2)
     return [r1,r2]
 
 def ipccsd_matvec(eom, vector, imds=None, diag=None):
     # Ref: Nooijen and Snijders, J. Chem. Phys. 102, 1681 (1995) Eqs.(8)-(9)
     if imds is None: imds = eom.make_imds()
-    lib, symlib = eom.lib, eom.symlib
     r1,r2 = eom.vector_to_amplitudes(vector)
 
     # 1h-1h block
-    Hr1 = -lib.einsum('ki,k->i',imds.Loo,r1,symlib)
+    Hr1 = -lib.einsum('ki,k->i',imds.Loo,r1)
     #1h-2h1p block
-    Hr1 += 2*lib.einsum('ld,ild->i',imds.Fov,r2,symlib)
-    Hr1 +=  -lib.einsum('kd,kid->i',imds.Fov,r2,symlib)
-    Hr1 += -2*lib.einsum('klid,kld->i',imds.Wooov,r2,symlib)
-    Hr1 +=    lib.einsum('lkid,kld->i',imds.Wooov,r2,symlib)
+    Hr1 += 2*lib.einsum('ld,ild->i',imds.Fov,r2)
+    Hr1 +=  -lib.einsum('kd,kid->i',imds.Fov,r2)
+    Hr1 += -2*lib.einsum('klid,kld->i',imds.Wooov,r2)
+    Hr1 +=    lib.einsum('lkid,kld->i',imds.Wooov,r2)
 
     # 2h1p-1h block
-    Hr2 = -lib.einsum('kbij,k->ijb',imds.Wovoo,r1,symlib)
+    Hr2 = -lib.einsum('kbij,k->ijb',imds.Wovoo,r1)
     # 2h1p-2h1p block
     if eom.partition == 'mp':
         foo = self.eris.foo
         fvv = self.eris.fvv
-        Hr2 += lib.einsum('bd,ijd->ijb',fvv,r2,symlib)
-        Hr2 += -lib.einsum('ki,kjb->ijb',foo,r2,symlib)
-        Hr2 += -lib.einsum('lj,ilb->ijb',foo,r2,symlib)
+        Hr2 += lib.einsum('bd,ijd->ijb',fvv,r2)
+        Hr2 += -lib.einsum('ki,kjb->ijb',foo,r2)
+        Hr2 += -lib.einsum('lj,ilb->ijb',foo,r2)
     elif eom.partition == 'full':
         Hr2 += self._ipccsd_diag_matrix2*r2
     else:
-        Hr2 += lib.einsum('bd,ijd->ijb',imds.Lvv,r2,symlib)
-        Hr2 += -lib.einsum('ki,kjb->ijb',imds.Loo,r2,symlib)
-        Hr2 += -lib.einsum('lj,ilb->ijb',imds.Loo,r2,symlib)
-        Hr2 +=  lib.einsum('klij,klb->ijb',imds.Woooo,r2,symlib)
-        Hr2 += 2*lib.einsum('lbdj,ild->ijb',imds.Wovvo,r2,symlib)
-        Hr2 +=  -lib.einsum('kbdj,kid->ijb',imds.Wovvo,r2,symlib)
-        Hr2 +=  -lib.einsum('lbjd,ild->ijb',imds.Wovov,r2,symlib) #typo in Ref
-        Hr2 +=  -lib.einsum('kbid,kjd->ijb',imds.Wovov,r2,symlib)
-        tmp = 2*lib.einsum('lkdc,kld->c',imds.Woovv,r2,symlib)
-        tmp += -lib.einsum('kldc,kld->c',imds.Woovv,r2,symlib)
-        Hr2 += -lib.einsum('c,ijcb->ijb',tmp,imds.t2,symlib)
+        Hr2 += lib.einsum('bd,ijd->ijb',imds.Lvv,r2)
+        Hr2 += -lib.einsum('ki,kjb->ijb',imds.Loo,r2)
+        Hr2 += -lib.einsum('lj,ilb->ijb',imds.Loo,r2)
+        Hr2 +=  lib.einsum('klij,klb->ijb',imds.Woooo,r2)
+        Hr2 += 2*lib.einsum('lbdj,ild->ijb',imds.Wovvo,r2)
+        Hr2 +=  -lib.einsum('kbdj,kid->ijb',imds.Wovvo,r2)
+        Hr2 +=  -lib.einsum('lbjd,ild->ijb',imds.Wovov,r2) #typo in Ref
+        Hr2 +=  -lib.einsum('kbid,kjd->ijb',imds.Wovov,r2)
+        tmp = 2*lib.einsum('lkdc,kld->c',imds.Woovv,r2)
+        tmp += -lib.einsum('kldc,kld->c',imds.Woovv,r2)
+        Hr2 += -lib.einsum('c,ijcb->ijb',tmp,imds.t2)
 
     vector = eom.amplitudes_to_vector(Hr1,Hr2)
     return vector
 
 def ipccsd_diag(eom, imds=None):
     if imds is None: imds = eom.make_imds()
-    lib, backend, symlib = eom.lib, eom.backend, eom.symlib
-    tensor, zeros = lib.tensor, lib.zeros
     t1, t2 = imds.t1, imds.t2
     nocc, nvir = t1.shape
     foo = imds.eris.foo
@@ -118,10 +124,10 @@ def ipccsd_diag(eom, imds=None):
         ijb = ijb + fvv.diagonal().reshape(1,1,nvir)
         Hr2 = tensor(ijb)
     else:
-        wij = backend.einsum('ijij->ij', imds.Woooo.array)
-        wjb = backend.einsum('jbjb->jb', imds.Wovov.array)
-        wjb2 = backend.einsum('jbbj->jb', imds.Wovvo.array)
-        wib = backend.einsum('ibib->ib', imds.Wovov.array)
+        wij = ctf.einsum('ijij->ij', imds.Woooo.array)
+        wjb = ctf.einsum('jbjb->jb', imds.Wovov.array)
+        wjb2 = ctf.einsum('jbbj->jb', imds.Wovvo.array)
+        wib = ctf.einsum('ibib->ib', imds.Wovov.array)
         ijb  = imds.Lvv.diagonal().reshape(1,1,nvir)
         ijb = ijb - imds.Loo.diagonal().reshape(nocc,1,1)
         ijb = ijb -imds.Loo.diagonal().reshape(1,nocc,1)
@@ -129,11 +135,11 @@ def ipccsd_diag(eom, imds=None):
         ijb = ijb + wij.reshape(nocc,nocc,1)
         ijb = ijb - wjb.reshape(1,nocc,nvir)
         ijb = ijb + 2*wjb2.reshape(1,nocc,nvir)
-        ijb = ijb - backend.einsum('ij,jb->ijb', backend.eye(nocc), wjb2)
+        ijb = ijb - ctf.einsum('ij,jb->ijb', ctf.eye(nocc), wjb2)
         ijb = ijb - wib.reshape(nocc,1,nvir)
         Hr2 = tensor(ijb)
-        Hr2 -= 2.*lib.einsum('ijcb,jibc->ijb', t2, imds.Woovv, symlib)
-        Hr2 += lib.einsum('ijcb,ijbc->ijb', t2, imds.Woovv, symlib)
+        Hr2 -= 2.*lib.einsum('ijcb,jibc->ijb', t2, imds.Woovv)
+        Hr2 += lib.einsum('ijcb,ijbc->ijb', t2, imds.Woovv)
     vector = eom.amplitudes_to_vector(Hr1,Hr2)
     return vector
 
@@ -141,53 +147,49 @@ def ipccsd_diag(eom, imds=None):
 def eaccsd_matvec(eom, vector, imds=None, diag=None):
     # Ref: Nooijen and Bartlett, J. Chem. Phys. 102, 3629 (1994) Eqs.(30)-(31)
     if imds is None: imds = eom.make_imds()
-    lib, symlib = eom.lib, eom.symlib
     r1,r2 = eom.vector_to_amplitudes(vector)
 
     # Eq. (30)
     # 1p-1p block
-    Hr1 =  lib.einsum('ac,c->a',imds.Lvv,r1,symlib)
+    Hr1 =  lib.einsum('ac,c->a',imds.Lvv,r1)
     # 1p-2p1h block
-    Hr1 += lib.einsum('ld,lad->a',2.*imds.Fov,r2,symlib)
-    Hr1 += lib.einsum('ld,lda->a',  -imds.Fov,r2,symlib)
-    Hr1 += 2*lib.einsum('alcd,lcd->a',imds.Wvovv,r2,symlib)
-    Hr1 +=  -lib.einsum('aldc,lcd->a',imds.Wvovv,r2,symlib)
+    Hr1 += lib.einsum('ld,lad->a',2.*imds.Fov,r2)
+    Hr1 += lib.einsum('ld,lda->a',  -imds.Fov,r2)
+    Hr1 += 2*lib.einsum('alcd,lcd->a',imds.Wvovv,r2)
+    Hr1 +=  -lib.einsum('aldc,lcd->a',imds.Wvovv,r2)
     # Eq. (31)
     # 2p1h-1p block
-    Hr2 = lib.einsum('abcj,c->jab',imds.Wvvvo,r1,symlib)
+    Hr2 = lib.einsum('abcj,c->jab',imds.Wvvvo,r1)
     # 2p1h-2p1h block
     if eom.partition == 'mp':
         foo = imds.eris.foo
         fvv = imds.eris.fvv
-        Hr2 +=  lib.einsum('ac,jcb->jab',fvv,r2,symlib)
-        Hr2 +=  lib.einsum('bd,jad->jab',fvv,r2,symlib)
-        Hr2 += -lib.einsum('lj,lab->jab',foo,r2,symlib)
+        Hr2 +=  lib.einsum('ac,jcb->jab',fvv,r2)
+        Hr2 +=  lib.einsum('bd,jad->jab',fvv,r2)
+        Hr2 += -lib.einsum('lj,lab->jab',foo,r2)
     elif eom.partition == 'full':
         Hr2 += eom._eaccsd_diag_matrix2*r2
     else:
-        Hr2 +=  lib.einsum('ac,jcb->jab',imds.Lvv,r2,symlib)
-        Hr2 +=  lib.einsum('bd,jad->jab',imds.Lvv,r2,symlib)
-        Hr2 += -lib.einsum('lj,lab->jab',imds.Loo,r2,symlib)
-        Hr2 += 2*lib.einsum('lbdj,lad->jab',imds.Wovvo,r2,symlib)
-        Hr2 +=  -lib.einsum('lbjd,lad->jab',imds.Wovov,r2,symlib)
-        Hr2 +=  -lib.einsum('lajc,lcb->jab',imds.Wovov,r2,symlib)
-        Hr2 +=  -lib.einsum('lbcj,lca->jab',imds.Wovvo,r2,symlib)
+        Hr2 +=  lib.einsum('ac,jcb->jab',imds.Lvv,r2)
+        Hr2 +=  lib.einsum('bd,jad->jab',imds.Lvv,r2)
+        Hr2 += -lib.einsum('lj,lab->jab',imds.Loo,r2)
+        Hr2 += 2*lib.einsum('lbdj,lad->jab',imds.Wovvo,r2)
+        Hr2 +=  -lib.einsum('lbjd,lad->jab',imds.Wovov,r2)
+        Hr2 +=  -lib.einsum('lajc,lcb->jab',imds.Wovov,r2)
+        Hr2 +=  -lib.einsum('lbcj,lca->jab',imds.Wovvo,r2)
 
-        Hr2 +=   lib.einsum('abcd,jcd->jab',imds.Wvvvv,r2,symlib)
-        tmp = (2*lib.einsum('klcd,lcd->k',imds.Woovv,r2,symlib)
-                -lib.einsum('kldc,lcd->k',imds.Woovv,r2,symlib))
-        Hr2 += -lib.einsum('k,kjab->jab',tmp,imds.t2,symlib)
+        Hr2 +=   lib.einsum('abcd,jcd->jab',imds.Wvvvv,r2)
+        tmp = (2*lib.einsum('klcd,lcd->k',imds.Woovv,r2)
+                -lib.einsum('kldc,lcd->k',imds.Woovv,r2))
+        Hr2 += -lib.einsum('k,kjab->jab',tmp,imds.t2)
 
     vector = eom.amplitudes_to_vector(Hr1,Hr2)
     return vector
 
 def eaccsd_diag(eom, imds=None):
     if imds is None: imds = eom.make_imds()
-    lib, symlib, backend = eom.lib, eom.symlib, eom.backend
-    tensor, zeros = lib.tensor, lib.zeros
     t1, t2 = imds.t1, imds.t2
     nocc, nvir = t1.shape
-
     foo = imds.eris.foo
     fvv = imds.eris.fvv
     Hr1 = imds.Lvv.diagonal()
@@ -202,18 +204,18 @@ def eaccsd_diag(eom, imds=None):
         jab = imds.Lvv.diagonal().reshape(1,nvir,1)
         jab = jab + imds.Lvv.diagonal().reshape(1,1,nvir)
         jab = jab - imds.Loo.diagonal().reshape(nocc,1,1)
-        wab = backend.einsum("abab->ab", imds.Wvvvv.array)
-        wjb = backend.einsum('jbjb->jb', imds.Wovov.array)
-        wjb2 = backend.einsum('jbbj->jb', imds.Wovvo.array)
-        wja = backend.einsum('jaja->ja', imds.Wovov.array)
+        wab = ctf.einsum("abab->ab", imds.Wvvvv.array)
+        wjb = ctf.einsum('jbjb->jb', imds.Wovov.array)
+        wjb2 = ctf.einsum('jbbj->jb', imds.Wovvo.array)
+        wja = ctf.einsum('jaja->ja', imds.Wovov.array)
         jab = jab + wab.reshape(1,nvir,nvir)
         jab = jab - wjb.reshape(nocc,1,nvir)
         jab = jab + 2*wjb2.reshape(nocc,1,nvir)
-        jab -= backend.einsum('jb,ab->jab', wjb2, backend.eye(nvir))
+        jab -= ctf.einsum('jb,ab->jab', wjb2, ctf.eye(nvir))
         jab = jab - wja.reshape(nocc,nvir,1)
         Hr2 = tensor(jab)
-        Hr2 -= 2*lib.einsum('ijab,ijab->jab', t2, imds.Woovv, symlib)
-        Hr2 += lib.einsum('ijab,ijba->jab', t2, imds.Woovv, symlib)
+        Hr2 -= 2*lib.einsum('ijab,ijab->jab', t2, imds.Woovv)
+        Hr2 += lib.einsum('ijab,ijba->jab', t2, imds.Woovv)
     vector = eom.amplitudes_to_vector(Hr1,Hr2)
     return vector
 
@@ -222,9 +224,7 @@ class EOMIP(EOM):
         EOM.__init__(self,cc)
         self.lib = cc.lib
         self.symlib = cc.symlib
-        self.backend =  cc.backend
         self._backend = cc._backend
-        self.log = cc.log
         self.t1, self.t2 = cc.t1, cc.t2
 
     amplitudes_to_vector = amplitudes_to_vector
@@ -267,18 +267,18 @@ class EOMIP(EOM):
         else:
             if diag is None: diag = self.get_diag()
             idx = self.backend.to_nparray(diag).argsort()[:nroots]
-        rank = getattr(self.backend, 'rank', 0)
-        guess = self.backend.zeros([nroots,size], dtype)
+        guess = ctf.zeros([nroots,size], dtype)
         idx = np.arange(nroots)*size + np.asarray(idx)
         if rank==0:
-            self.backend.write(guess, idx, np.ones(nroots))
+            guess.write(idx, np.ones(nroots))
         else:
-            self.backend.write(guess, [], [])
+            guess.write([],[])
 
         return guess
 
     def dump_flags(self, verbose=None):
-        logger = self.log
+        if verbose is None: verbose=self.verbose
+        logger = Logger(self.stdout, verbose)
         logger.info('')
         logger.info('******** %s ********', self.__class__)
         logger.info('max_space = %d', self.max_space)
@@ -311,19 +311,18 @@ class EOMEA(EOMIP):
         size = self.vector_size()
         dtype = getattr(diag, 'dtype', np.double)
         nroots = min(nroots, size)
-        rank = getattr(self.backend, 'rank', 0)
         guess = []
         if koopmans:
             idx = range(nroots)
         else:
             if diag is None: diag = self.get_diag()
-            idx = self.backend.to_nparray(diag).argsort()[:nroots]
-        guess = self.backend.zeros([nroots,size], dtype)
+            idx = diag.to_nparray().argsort()[:nroots]
+        guess = ctf.zeros([nroots,size], dtype)
         idx = np.arange(nroots)*size + np.asarray(idx)
         if rank==0:
-            self.backend.write(guess, idx, np.ones(nroots))
+            guess.write(idx, np.ones(nroots))
         else:
-            self.backend.write(guess, [], [])
+            guess.write([], [])
         return guess
 
     @property
@@ -342,12 +341,11 @@ class _IMDS:
         self.made_ip_imds = False
         self.made_ea_imds = False
         self._made_shared_2e = False
-        self.log = cc.log
         self.symlib = cc.symlib
+        self.log = Logger(cc.stdout, cc.verbose)
 
     def _make_shared_1e(self):
         cput0 = (time.clock(), time.time())
-
         t1,t2,eris = self.t1, self.t2, self.eris
         self.Loo = imd.Loo(t1,t2,eris)
         self.Lvv = imd.Lvv(t1,t2,eris)
@@ -409,8 +407,7 @@ class _IMDS:
 
 if __name__ == '__main__':
     from pyscf import gto, scf, cc
-    from rccsd import RCCSD
-    from ccsd_ctf import CTFRCCSD
+    from cc_sym.rccsd import RCCSD
     mol = gto.Mole()
     mol.atom = [
         [8 , (0. , 0.     , 0.)],
@@ -422,7 +419,7 @@ if __name__ == '__main__':
     mol.build()
     mf = scf.RHF(mol).run(conv_tol=1e-14)
 
-    mycc = CTFRCCSD(mf)
+    mycc = RCCSD(mf)
     #mycc = RCCSD(mf)
     ecc, t1, t2 = mycc.kernel()
 

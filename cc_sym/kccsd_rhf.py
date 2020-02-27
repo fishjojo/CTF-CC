@@ -1,32 +1,33 @@
 #!/usr/bin/env python
 
-
-'''
-Restricted Kpoint CCSD
-'''
-
-from functools import reduce
 import time
 import numpy as np
 from pyscf import lib as pyscflib
-from cc_sym import rccsd
-from symtensor import sym
+from symtensor import sym_ctf as lib
 from symtensor.symlib import SYMLIB
+from pyscf.pbc.lib import kpts_helper
 from pyscf.pbc.mp.kmp2 import (get_frozen_mask, get_nocc, get_nmo,
                                padded_mo_coeff, padding_k_idx)
 from pyscf.pbc.cc.kccsd_rhf import _get_epq
 from pyscf.lib.parameters import LOOSE_ZERO_TOL, LARGE_DENOM
-from pyscf.pbc.lib import kpts_helper
-import itertools
+import ctf
+from cc_sym import rccsd
+
+rank = rccsd.rank
+comm = rccsd.comm
+size = rccsd.size
+tensor = lib.tensor
+zeros = lib.zeros
+Logger = rccsd.Logger
 
 def energy(cc, t1, t2, eris):
-    lib, symlib, log = eris.lib, eris.symlib, cc.log
-    nkpts = len(cc.kpts)
-    e = 2*lib.einsum('ia,ia', eris.fov, t1, symlib)
-    tau = lib.einsum('ia,jb->ijab',t1,t1, symlib)
+    log = Logger(cc.stdout, cc.verbose)
+    nkpts = cc.nkpts
+    e = 2*lib.einsum('ia,ia', eris.fov, t1)
+    tau = lib.einsum('ia,jb->ijab',t1,t1)
     tau += t2
-    e += 2*lib.einsum('ijab,iajb', tau, eris.ovov, symlib)
-    e +=  -lib.einsum('ijab,ibja', tau, eris.ovov, symlib)
+    e += 2*lib.einsum('ijab,iajb', tau, eris.ovov)
+    e +=  -lib.einsum('ijab,ibja', tau, eris.ovov)
     if abs(e.imag)>1e-4:
         log.warn('Non-zero imaginary part found in KRCCSD energy %s', e)
     return e.real / nkpts
@@ -39,15 +40,45 @@ class KRCCSD(rccsd.RCCSD):
         self.khelper = kpts_helper.KptsHelper(mf.cell, mf.kpts)
         self.max_space = 20
         self._keys = self._keys.union(['max_space'])
-        self.lib = sym
-        self.backend = sym.backend
-        self.log = self.backend.Logger(self.stdout, self.verbose)
-        self.symlib = SYMLIB('numpy')
+        self.symlib = SYMLIB('ctf')
         self.make_symlib()
+
+    energy = energy
+    get_nocc = get_nocc
+    get_nmo = get_nmo
+    get_frozen_mask = get_frozen_mask
 
     @property
     def nkpts(self):
         return len(self.kpts)
+
+    def ao2mo(self, mo_coeff=None):
+        return _ChemistsERIs(self, mo_coeff)
+
+    def init_amps(self, eris):
+        time0 = time.clock(), time.time()
+        log = Logger(self.stdout, self.verbose)
+        nocc = self.nocc
+        nvir = self.nmo - nocc
+        kpts = self.kpts
+        nkpts = self.nkpts
+        gvec = self._scf.cell.reciprocal_vectors()
+        sym1 = ['+-', [kpts,]*2, None, gvec]
+        t1 = lib.zeros([nocc,nvir], eris.dtype, sym1, symlib=self.symlib)
+        t2 = eris.ovov.transpose(0,2,1,3).conj() / eris.eijab
+        self.emp2  = 2*lib.einsum('ijab,iajb', t2, eris.ovov)
+        self.emp2 -=   lib.einsum('ijab,ibja', t2, eris.ovov)
+        self.emp2 = self.emp2.real/nkpts
+        log.info('Init t2, MP2 energy (with fock eigenvalue shift) = %.15g', self.emp2)
+        log.timer('init mp2', *time0)
+        return self.emp2, t1, t2
+
+    def make_symlib(self):
+        kpts = self.kpts
+        gvec = self._scf.cell.reciprocal_vectors()
+        sym1 = ['+-',[kpts,]*2, None, gvec]
+        sym2 = ['++--',[kpts,]*4, None, gvec]
+        self.symlib.update(sym1, sym2)
 
     def vector_to_amplitudes(self, vec, nmo=None, nocc=None):
         if nocc is None: nocc = self.nocc
@@ -62,42 +93,10 @@ class KRCCSD(rccsd.RCCSD):
         gvec = self._scf.cell.reciprocal_vectors()
         sym1 = ['+-',[kpts,]*2, None, gvec]
         sym2 = ['++--',[kpts,]*4, None, gvec]
-        t1  = self.lib.tensor(t1, sym1)
-        t2  = self.lib.tensor(t2, sym2)
+        t1  = tensor(t1, sym1, symlib=self.symlib)
+        t2  = tensor(t2, sym2, symlib=self.symlib)
         return t1, t2
 
-    def make_symlib(self):
-        kpts = self.kpts
-        gvec = self._scf.cell.reciprocal_vectors()
-        sym1 = ['+-',[kpts,]*2, None, gvec]
-        sym2 = ['++--',[kpts,]*4, None, gvec]
-        self.symlib.update(sym1, sym2)
-
-    energy = energy
-    get_nocc = get_nocc
-    get_nmo = get_nmo
-    get_frozen_mask = get_frozen_mask
-
-    def init_amps(self, eris):
-        time0 = time.clock(), time.time()
-        log, lib, symlib = self.log, self.lib, self.symlib
-        nocc = self.nocc
-        nvir = self.nmo - nocc
-        kpts = self.kpts
-        nkpts = self.nkpts
-        gvec = self._scf.cell.reciprocal_vectors()
-        sym1 = ['+-', [kpts,]*2, None, gvec]
-        t1 = lib.zeros([nocc,nvir], eris.dtype, sym1)
-        t2 = eris.ovov.transpose(0,2,1,3).conj() / eris.eijab
-        self.emp2  = 2*lib.einsum('ijab,iajb', t2, eris.ovov, symlib)
-        self.emp2 -=   lib.einsum('ijab,ibja', t2, eris.ovov, symlib)
-        self.emp2 = self.emp2.real/nkpts
-        log.info('Init t2, MP2 energy (with fock eigenvalue shift) = %.15g', self.emp2)
-        log.timer('init mp2', *time0)
-        return self.emp2, t1, t2
-
-    def ao2mo(self, mo_coeff=None):
-        return _ChemistsERIs(self, mo_coeff)
 
 class _ChemistsERIs:
     def __init__(self, cc, mo_coeff=None):
@@ -106,28 +105,18 @@ class _ChemistsERIs:
         if mo_coeff is None:
             mo_coeff = cc.mo_coeff
         cput0 = (time.clock(), time.time())
-        log, lib, backend = cc.log, cc.lib, cc.backend
+        symlib = cc.symlib
+        log = Logger(cc.stdout, cc.verbose)
         self.lib = lib
-        self.symlib = cc.symlib
-        tensor, zeros = lib.tensor, lib.zeros
         nocc, nmo, nkpts = cc.nocc, cc.nmo, cc.nkpts
         nvir = nmo - nocc
         cell, kpts = cc._scf.cell, cc.kpts
         gvec = cell.reciprocal_vectors()
         sym1 = ['+-', [kpts,]*2, None, gvec]
         sym2 = ['+-+-', [kpts,]*4, None, gvec]
-        self.dtype = dtype = np.result_type(*cc.mo_coeff).char
-        rank = getattr(backend, 'rank', 0)
-        comm = getattr(backend, 'comm', None)
         mo_coeff = self.mo_coeff = padded_mo_coeff(cc, mo_coeff)
         nonzero_opadding, nonzero_vpadding = padding_k_idx(cc, kind="split")
         madelung = tools.madelung(cell, kpts)
-        self.foo = zeros([nocc,nocc], dtype, sym1)
-        self.fov = zeros([nocc,nvir], dtype, sym1)
-        self.fvv = zeros([nvir,nvir], dtype, sym1)
-        self.eia = zeros([nocc,nvir], np.float64, sym1)
-        self._foo = zeros([nocc,nocc], dtype, sym1)
-        self._fvv = zeros([nvir,nvir], dtype, sym1)
         fock = None
         if rank==0:
             dm = cc._scf.make_rdm1(cc.mo_coeff, cc.mo_occ)
@@ -135,8 +124,14 @@ class _ChemistsERIs:
                 fockao = cc._scf.get_hcore() + cc._scf.get_veff(cell, dm)
             fock = np.asarray([reduce(np.dot, (mo.T.conj(), fockao[k], mo))
                                 for k, mo in enumerate(mo_coeff)])
-        if comm is not None:
-            fock = comm.bcast(fock, root=0)
+        fock = comm.bcast(fock, root=0)
+        self.dtype = dtype = np.result_type(*(cc.mo_coeff, fock)).char
+        self.foo = zeros([nocc,nocc], dtype, sym1, symlib=symlib)
+        self.fov = zeros([nocc,nvir], dtype, sym1, symlib=symlib)
+        self.fvv = zeros([nvir,nvir], dtype, sym1, symlib=symlib)
+        self.eia = zeros([nocc,nvir], np.float64, sym1, symlib=symlib)
+        self._foo = zeros([nocc,nocc], dtype, sym1, symlib=symlib)
+        self._fvv = zeros([nvir,nvir], dtype, sym1, symlib=symlib)
 
         foo = fock[:,:nocc,:nocc]
         fov = fock[:,:nocc,nocc:]
@@ -169,15 +164,14 @@ class _ChemistsERIs:
             self.eia.write([],[])
             self._foo.write([],[])
             self._fvv.write([],[])
-
-        self.oooo = zeros([nocc,nocc,nocc,nocc], dtype, sym2)
-        self.ooov = zeros([nocc,nocc,nocc,nvir], dtype, sym2)
-        self.ovov = zeros([nocc,nvir,nocc,nvir], dtype, sym2)
-        self.oovv = zeros([nocc,nocc,nvir,nvir], dtype, sym2)
-        self.ovvo = zeros([nocc,nvir,nvir,nocc], dtype, sym2)
-        self.ovvv = zeros([nocc,nvir,nvir,nvir], dtype, sym2)
-        self.vvvv = zeros([nvir,nvir,nvir,nvir], dtype, sym2)
-        self.eijab = zeros([nocc,nocc,nvir,nvir], np.float64, sym2)
+        self.oooo = zeros([nocc,nocc,nocc,nocc], dtype, sym2, symlib=symlib)
+        self.ooov = zeros([nocc,nocc,nocc,nvir], dtype, sym2, symlib=symlib)
+        self.ovov = zeros([nocc,nvir,nocc,nvir], dtype, sym2, symlib=symlib)
+        self.oovv = zeros([nocc,nocc,nvir,nvir], dtype, sym2, symlib=symlib)
+        self.ovvo = zeros([nocc,nvir,nvir,nocc], dtype, sym2, symlib=symlib)
+        self.ovvv = zeros([nocc,nvir,nvir,nvir], dtype, sym2, symlib=symlib)
+        self.vvvv = zeros([nvir,nvir,nvir,nvir], dtype, sym2, symlib=symlib)
+        self.eijab = zeros([nocc,nocc,nvir,nvir], np.float64, sym2, symlib=symlib)
 
         with_df = cc._scf.with_df
         fao2mo = cc._scf.with_df.ao2mo
@@ -193,18 +187,15 @@ class _ChemistsERIs:
         idx_vvvv = np.arange(nvir*nvir*nvir*nvir)
 
         jobs = list(khelper.symm_map.keys())
-        tasks, ntasks = self.gen_tasks(jobs)
+        tasks = rccsd.static_partition(jobs)
+        ntasks = max(comm.allgather(len(tasks)))
         nwrite = 0
         for itask in tasks:
             ikp, ikq, ikr = itask
             pqr = np.asarray(khelper.symm_map[(ikp,ikq,ikr)])
             nwrite += len(np.unique(pqr, axis=0))
 
-        comm = getattr(backend,'comm', None)
-        if comm is not None:
-            nwrite_max = max(comm.allgather(nwrite))
-        else:
-            nwrite_max = nwrite
+        nwrite_max = max(comm.allgather(nwrite))
         write_count = 0
         for itask in range(ntasks):
             if itask >= len(tasks):
@@ -250,8 +241,6 @@ class _ChemistsERIs:
                 self.eijab.write(off*idx_oovv.size+idx_oovv, eijab.ravel())
                 done[kp,kq,kr] = 1
                 write_count += 1
-                log.debug1('_ERIS pqr %d', off)
-
         for i in range(nwrite_max-write_count):
             self.oooo.write([], [])
             self.ooov.write([], [])
@@ -261,9 +250,8 @@ class _ChemistsERIs:
             self.ovvv.write([], [])
             self.vvvv.write([], [])
             self.eijab.write([], [])
+        log.timer("ao2mo transformation", *cput0)
 
-    def gen_tasks(self, jobs):
-        return jobs, len(jobs)
 
 if __name__ == '__main__':
     from pyscf.pbc import gto, scf, cc
@@ -280,7 +268,7 @@ if __name__ == '__main__':
     3.370137329, 0.000000000, 3.370137329
     3.370137329, 3.370137329, 0.000000000'''
     cell.unit = 'B'
-    cell.verbose = 0
+    cell.verbose = 5
     cell.mesh = [5,5,5]
     cell.build()
 
@@ -292,33 +280,28 @@ if __name__ == '__main__':
     else:
         mf.chkfile = chkfile
         mf.kernel()
-
     mycc = KRCCSD(mf)
     mycc.max_cycle=100
     eris = mycc.ao2mo()
-
     _, t1, t2 = mycc.init_amps(eris)
     t10, t20 = mycc.update_amps(t1, t2, eris)
-
+    '''
     refcc = cc.KRCCSD(mf)
 
     erisref = refcc.ao2mo()
     _, t1r, t2r= refcc.init_amps(erisref)
     t1r0, t2r0= refcc.update_amps(t1r, t2r, erisref)
 
-    print((eris.oooo.transpose(0,2,1,3)-erisref.oooo).norm())
-    print((eris.ooov.transpose(0,2,1,3)-erisref.ooov).norm())
-    print((eris.ovov.transpose(0,2,1,3)-erisref.oovv).norm())
-    print((eris.oovv.transpose(0,2,1,3)-erisref.ovov).norm())
-    print((eris.ovvo.transpose(2,0,3,1)-erisref.voov).norm())
-    print((eris.ovvv.transpose(2,0,3,1)-erisref.vovv).norm())
-    print((eris.vvvv.transpose(0,2,1,3)-erisref.vvvv).norm())
+    print(np.linalg.norm(eris.oooo.transpose(0,2,1,3).array.to_nparray()-erisref.oooo))
+    print(np.linalg.norm(eris.ooov.transpose(0,2,1,3).array.to_nparray()-erisref.ooov))
+    print(np.linalg.norm(eris.ovov.transpose(0,2,1,3).array.to_nparray()-erisref.oovv))
+    print(np.linalg.norm(eris.oovv.transpose(0,2,1,3).array.to_nparray()-erisref.ovov))
+    print(np.linalg.norm(eris.ovvo.transpose(2,0,3,1).array.to_nparray()-erisref.voov))
+    print(np.linalg.norm(eris.ovvv.transpose(2,0,3,1).array.to_nparray()-erisref.vovv))
+    print(np.linalg.norm(eris.vvvv.transpose(0,2,1,3).array.to_nparray()-erisref.vvvv))
 
-    #print((eris.eijab-eijab).norm())
-    print((t2-t2r).norm())
-    print("t1", (t10-t1r0).norm())
-    print("t2", (t20-t2r0).norm())
-
-    #mycc.kernel()
-    ecc, t1r, t2r = refcc.kernel()
+    print("t1", np.linalg.norm(t10.array.to_nparray()-t1r0))
+    print("t2", np.linalg.norm(t20.array.to_nparray()-t2r0))
+    '''
     mycc.kernel()
+    #refcc.kernel()
