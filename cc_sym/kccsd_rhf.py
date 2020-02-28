@@ -1,5 +1,7 @@
 #!/usr/bin/env python
-
+#
+# Author: Yang Gao <younggao1994@gmail.com>
+#
 import time
 import numpy as np
 from pyscf import lib as pyscflib
@@ -9,16 +11,20 @@ from pyscf.pbc.lib import kpts_helper
 from pyscf.pbc.mp.kmp2 import (get_frozen_mask, get_nocc, get_nmo,
                                padded_mo_coeff, padding_k_idx)
 from pyscf.pbc.cc.kccsd_rhf import _get_epq
-from pyscf.lib.parameters import LOOSE_ZERO_TOL, LARGE_DENOM
 import ctf
 from cc_sym import rccsd
+from pyscf.pbc import tools, df
 
-rank = rccsd.rank
-comm = rccsd.comm
-size = rccsd.size
+from cc_sym import settings
+comm = settings.comm
+rank = settings.rank
+size = settings.size
+Logger = settings.Logger
+static_partition = settings.static_partition
+
 tensor = lib.tensor
 zeros = lib.zeros
-Logger = rccsd.Logger
+
 
 def energy(cc, t1, t2, eris):
     log = Logger(cc.stdout, cc.verbose)
@@ -78,7 +84,8 @@ class KRCCSD(rccsd.RCCSD):
         gvec = self._scf.cell.reciprocal_vectors()
         sym1 = ['+-',[kpts,]*2, None, gvec]
         sym2 = ['++--',[kpts,]*4, None, gvec]
-        self.symlib.update(sym1, sym2)
+        sym3 = ['++-',[kpts,]*3, None, gvec]
+        self.symlib.update(sym1, sym2, sym3)
 
     def vector_to_amplitudes(self, vec, nmo=None, nocc=None):
         if nocc is None: nocc = self.nocc
@@ -97,6 +104,227 @@ class KRCCSD(rccsd.RCCSD):
         t2  = tensor(t2, sym2, symlib=self.symlib)
         return t1, t2
 
+    def ipccsd(self, nroots=1, koopmans=False, guess=None, left=False,
+               eris=None, partition=None, kptlist=None):
+        from cc_sym import eom_kccsd_rhf
+        return eom_kccsd_rhf.EOMIP(self).kernel(nroots=nroots, koopmans=koopmans,
+                                                guess=guess, left=left,
+                                                eris=eris, partition=partition,
+                                                kptlist=kptlist)
+
+    def eaccsd(self, nroots=1, koopmans=False, guess=None, left=False,
+               eris=None, partition=None, kptlist=None):
+        from cc_sym import eom_kccsd_rhf
+        return eom_kccsd_rhf.EOMEA(self).kernel(nroots=nroots, koopmans=koopmans,
+                                                guess=guess, left=left,
+                                                eris=eris, partition=partition,
+                                                kptlist=kptlist)
+
+def _make_fftdf_eris(mycc, eris):
+    mydf = mycc._scf.with_df
+    mo_coeff = eris.mo_coeff
+    kpts = mycc.kpts
+    logger = Logger(mycc.stdout, mycc.verbose)
+    cell = mydf.cell
+    gvec = cell.reciprocal_vectors()
+    nao = cell.nao_nr()
+    coords = cell.gen_uniform_grids(mydf.mesh)
+    ngrids = len(coords)
+    nkpts = len(kpts)
+
+    nocc, nmo = mycc.nocc, mycc.nmo
+    nvir = nmo - nocc
+    cput1 = cput0 = (time.clock(), time.time())
+    ijG = ctf.zeros([nkpts,nkpts,nocc,nocc,ngrids], dtype=np.complex128)
+    iaG = ctf.zeros([nkpts,nkpts,nocc,nvir,ngrids], dtype=np.complex128)
+    abG = ctf.zeros([nkpts,nkpts,nvir,nvir,ngrids], dtype=np.complex128)
+
+    ijR = ctf.zeros([nkpts,nkpts,nocc,nocc,ngrids], dtype=np.complex128)
+    iaR = ctf.zeros([nkpts,nkpts,nocc,nvir,ngrids], dtype=np.complex128)
+    aiR = ctf.zeros([nkpts,nkpts,nvir,nocc,ngrids], dtype=np.complex128)
+    abR = ctf.zeros([nkpts,nkpts,nvir,nvir,ngrids], dtype=np.complex128)
+
+    jobs = []
+    for ki in range(nkpts):
+        for kj in range(ki,nkpts):
+            jobs.append([ki,kj])
+
+    tasks = list(static_partition(jobs))
+    ntasks = max(comm.allgather(len(tasks)))
+    idx_ooG = np.arange(nocc*nocc*ngrids)
+    idx_ovG = np.arange(nocc*nvir*ngrids)
+    idx_vvG = np.arange(nvir*nvir*ngrids)
+
+    for itask in range(ntasks):
+        if itask >= len(tasks):
+            ijR.write([], [])
+            iaR.write([], [])
+            aiR.write([], [])
+            abR.write([], [])
+            ijR.write([], [])
+            iaR.write([], [])
+            aiR.write([], [])
+            abR.write([], [])
+
+            ijG.write([], [])
+            iaG.write([], [])
+            abG.write([], [])
+            ijG.write([], [])
+            iaG.write([], [])
+            abG.write([], [])
+            continue
+        ki, kj = tasks[itask]
+        kpti, kptj = kpts[ki], kpts[kj]
+        ao_kpti = mydf._numint.eval_ao(cell, coords, kpti)[0]
+        ao_kptj = mydf._numint.eval_ao(cell, coords, kptj)[0]
+        q = kptj - kpti
+        coulG = tools.get_coulG(cell, q, mesh=mydf.mesh)
+        wcoulG = coulG * (cell.vol/ngrids)
+        fac = np.exp(-1j * np.dot(coords, q))
+        mo_kpti = np.dot(ao_kpti, mo_coeff[ki]).T
+        mo_kptj = np.dot(ao_kptj, mo_coeff[kj]).T
+        mo_pairs = np.einsum('ig,jg->ijg', mo_kpti.conj(), mo_kptj)
+        mo_pairs_G = tools.fft(mo_pairs.reshape(-1,ngrids)*fac, mydf.mesh)
+
+        off = ki * nkpts + kj
+        ijR.write(off*idx_ooG.size+idx_ooG, mo_pairs[:nocc,:nocc].ravel())
+        iaR.write(off*idx_ovG.size+idx_ovG, mo_pairs[:nocc,nocc:].ravel())
+        aiR.write(off*idx_ovG.size+idx_ovG, mo_pairs[nocc:,:nocc].ravel())
+        abR.write(off*idx_vvG.size+idx_vvG, mo_pairs[nocc:,nocc:].ravel())
+
+        off = kj * nkpts + ki
+        mo_pairs = mo_pairs.transpose(1,0,2).conj()
+        ijR.write(off*idx_ooG.size+idx_ooG, mo_pairs[:nocc,:nocc].ravel())
+        iaR.write(off*idx_ovG.size+idx_ovG, mo_pairs[:nocc,nocc:].ravel())
+        aiR.write(off*idx_ovG.size+idx_ovG, mo_pairs[nocc:,:nocc].ravel())
+        abR.write(off*idx_vvG.size+idx_vvG, mo_pairs[nocc:,nocc:].ravel())
+
+        mo_pairs = None
+        mo_pairs_G*= wcoulG
+        v = tools.ifft(mo_pairs_G, mydf.mesh)
+        v *= fac.conj()
+        v = v.reshape(nmo,nmo,ngrids)
+
+        off = ki * nkpts + kj
+        ijG.write(off*idx_ooG.size+idx_ooG, v[:nocc,:nocc].ravel())
+        iaG.write(off*idx_ovG.size+idx_ovG, v[:nocc,nocc:].ravel())
+        abG.write(off*idx_vvG.size+idx_vvG, v[nocc:,nocc:].ravel())
+
+        off = kj * nkpts + ki
+        v = v.transpose(1,0,2).conj()
+        ijG.write(off*idx_ooG.size+idx_ooG, v[:nocc,:nocc].ravel())
+        iaG.write(off*idx_ovG.size+idx_ovG, v[:nocc,nocc:].ravel())
+        abG.write(off*idx_vvG.size+idx_vvG, v[nocc:,nocc:].ravel())
+
+    cput1 = logger.timer("Generating ijG", *cput1)
+    sym1 = ["+-+", [kpts,]*3, None, gvec]
+    sym2 = ["+--", [kpts,]*3, None, gvec]
+
+    ooG = tensor(ijG, sym1)
+    ovG = tensor(iaG, sym1)
+    vvG = tensor(abG, sym1)
+
+    ooR = tensor(ijR, sym2)
+    ovR = tensor(iaR, sym2)
+    voR = tensor(aiR, sym2)
+    vvR = tensor(abR, sym2)
+
+    eris.oooo = lib.einsum('ijg,klg->ijkl', ooG, ooR)/ nkpts
+    eris.ooov = lib.einsum('ijg,kag->ijka', ooG, ovR)/ nkpts
+    eris.oovv = lib.einsum('ijg,abg->ijab', ooG, vvR)/ nkpts
+    ooG = ooR = ijG = ijR = None
+    eris.ovvo = lib.einsum('iag,bjg->iabj', ovG, voR)/ nkpts
+    eris.ovov = lib.einsum('iag,jbg->iajb', ovG, ovR)/ nkpts
+    ovR = iaR = voR = aiR = None
+    eris.ovvv = lib.einsum('iag,bcg->iabc', ovG, vvR)/ nkpts
+    ovG = iaG = None
+    eris.vvvv = lib.einsum('abg,cdg->abcd', vvG, vvR)/ nkpts
+    cput1 = logger.timer("ijG to eri", *cput1)
+
+def _make_df_eris(mycc, eris):
+    from cc_sym import mpigdf
+    mydf = mycc._scf.with_df
+    mo_coeff = eris.mo_coeff
+    if mydf.j3c is None: mydf.build()
+    gvec = mydf.cell.reciprocal_vectors()
+    nocc, nmo = mycc.nocc, mycc.nmo
+    nvir = nmo - nocc
+    kpts = mydf.kpts
+    nkpts = len(kpts)
+    nao, naux = mydf.j3c.shape[2:]
+    ijL = ctf.zeros([nkpts,nkpts,nocc,nocc,naux], dtype=mydf.j3c.dtype)
+    iaL = ctf.zeros([nkpts,nkpts,nocc,nvir,naux], dtype=mydf.j3c.dtype)
+    aiL = ctf.zeros([nkpts,nkpts,nvir,nocc,naux], dtype=mydf.j3c.dtype)
+    abL = ctf.zeros([nkpts,nkpts,nvir,nvir,naux], dtype=mydf.j3c.dtype)
+    jobs = []
+    for ki in range(nkpts):
+        for kj in range(ki,nkpts):
+            jobs.append([ki,kj])
+    tasks = static_partition(jobs)
+    ntasks = max(comm.allgather((len(tasks))))
+    idx_j3c = np.arange(nao**2*naux)
+    idx_ooL = np.arange(nocc**2*naux)
+    idx_ovL = np.arange(nocc*nvir*naux)
+    idx_vvL = np.arange(nvir**2*naux)
+    log = Logger(mydf.stdout, mydf.verbose)
+    cput1 = cput0 = (time.clock(), time.time())
+    for itask in range(ntasks):
+        if itask >= len(tasks):
+            mydf.j3c.read([])
+            ijL.write([], [])
+            iaL.write([], [])
+            aiL.write([], [])
+            abL.write([], [])
+
+            ijL.write([], [])
+            iaL.write([], [])
+            aiL.write([], [])
+            abL.write([], [])
+            continue
+        ki, kj = tasks[itask]
+        ijid, ijdagger = mpigdf.get_member(kpts[ki], kpts[kj], mydf.kptij_lst)
+        uvL = mydf.j3c.read(ijid*idx_j3c.size+idx_j3c).reshape(nao,nao,naux)
+        if ijdagger: uvL = uvL.transpose(1,0,2).conj()
+        pvL = np.einsum("up,uvL->pvL", mo_coeff[ki].conj(), uvL, optimize=True)
+        uvL = None
+        pqL = np.einsum('vq,pvL->pqL', mo_coeff[kj], pvL, optimize=True)
+
+        off = ki * nkpts + kj
+        ijL.write(off*idx_ooL.size+idx_ooL, pqL[:nocc,:nocc].ravel())
+        iaL.write(off*idx_ovL.size+idx_ovL, pqL[:nocc,nocc:].ravel())
+        aiL.write(off*idx_ovL.size+idx_ovL, pqL[nocc:,:nocc].ravel())
+        abL.write(off*idx_vvL.size+idx_vvL, pqL[nocc:,nocc:].ravel())
+
+        off = kj * nkpts + ki
+        pqL = pqL.transpose(1,0,2).conj()
+        ijL.write(off*idx_ooL.size+idx_ooL, pqL[:nocc,:nocc].ravel())
+        iaL.write(off*idx_ovL.size+idx_ovL, pqL[:nocc,nocc:].ravel())
+        aiL.write(off*idx_ovL.size+idx_ovL, pqL[nocc:,:nocc].ravel())
+        abL.write(off*idx_vvL.size+idx_vvL, pqL[nocc:,nocc:].ravel())
+
+    cput1 = log.timer("j3c transformation", *cput1)
+    sym1 = ["+-+", [kpts,]*3, None, gvec]
+    sym2 = ["+--", [kpts,]*3, None, gvec]
+
+    ooL = tensor(ijL, sym1)
+    ovL = tensor(iaL, sym1)
+    voL = tensor(aiL, sym1)
+    vvL = tensor(abL, sym1)
+
+    ooL2 = tensor(ijL, sym2)
+    ovL2 = tensor(iaL, sym2)
+    voL2 = tensor(aiL, sym2)
+    vvL2 = tensor(abL, sym2)
+
+    eris.oooo = lib.einsum('ijg,klg->ijkl', ooL, ooL2) / nkpts
+    eris.ooov = lib.einsum('ijg,kag->ijka', ooL, ovL2) / nkpts
+    eris.oovv = lib.einsum('ijg,abg->ijab', ooL, vvL2) / nkpts
+    eris.ovvo = lib.einsum('iag,bjg->iabj', ovL, voL2) / nkpts
+    eris.ovov = lib.einsum('iag,jbg->iajb', ovL, ovL2) / nkpts
+    eris.ovvv = lib.einsum('iag,bcg->iabc', ovL, vvL2) / nkpts
+    eris.vvvv = lib.einsum('abg,cdg->abcd', vvL, vvL2) / nkpts
+
+    cput1 = log.timer("integral transformation", *cput1)
 
 class _ChemistsERIs:
     def __init__(self, cc, mo_coeff=None):
@@ -125,7 +353,7 @@ class _ChemistsERIs:
             fock = np.asarray([reduce(np.dot, (mo.T.conj(), fockao[k], mo))
                                 for k, mo in enumerate(mo_coeff)])
         fock = comm.bcast(fock, root=0)
-        self.dtype = dtype = np.result_type(*(cc.mo_coeff, fock)).char
+        self.dtype = dtype = np.result_type(*(mo_coeff, fock)).char
         self.foo = zeros([nocc,nocc], dtype, sym1, symlib=symlib)
         self.fov = zeros([nocc,nvir], dtype, sym1, symlib=symlib)
         self.fvv = zeros([nvir,nvir], dtype, sym1, symlib=symlib)
@@ -164,30 +392,15 @@ class _ChemistsERIs:
             self.eia.write([],[])
             self._foo.write([],[])
             self._fvv.write([],[])
-        self.oooo = zeros([nocc,nocc,nocc,nocc], dtype, sym2, symlib=symlib)
-        self.ooov = zeros([nocc,nocc,nocc,nvir], dtype, sym2, symlib=symlib)
-        self.ovov = zeros([nocc,nvir,nocc,nvir], dtype, sym2, symlib=symlib)
-        self.oovv = zeros([nocc,nocc,nvir,nvir], dtype, sym2, symlib=symlib)
-        self.ovvo = zeros([nocc,nvir,nvir,nocc], dtype, sym2, symlib=symlib)
-        self.ovvv = zeros([nocc,nvir,nvir,nvir], dtype, sym2, symlib=symlib)
-        self.vvvv = zeros([nvir,nvir,nvir,nvir], dtype, sym2, symlib=symlib)
+
         self.eijab = zeros([nocc,nocc,nvir,nvir], np.float64, sym2, symlib=symlib)
 
-        with_df = cc._scf.with_df
-        fao2mo = cc._scf.with_df.ao2mo
         kconserv = cc.khelper.kconserv
         khelper = cc.khelper
 
-        idx_oooo = np.arange(nocc*nocc*nocc*nocc)
-        idx_ooov = np.arange(nocc*nocc*nocc*nvir)
-        idx_ovov = np.arange(nocc*nvir*nocc*nvir)
         idx_oovv = np.arange(nocc*nocc*nvir*nvir)
-        idx_ovvo = np.arange(nocc*nvir*nvir*nocc)
-        idx_ovvv = np.arange(nocc*nvir*nvir*nvir)
-        idx_vvvv = np.arange(nvir*nvir*nvir*nvir)
-
         jobs = list(khelper.symm_map.keys())
-        tasks = rccsd.static_partition(jobs)
+        tasks = static_partition(jobs)
         ntasks = max(comm.allgather(len(tasks)))
         nwrite = 0
         for itask in tasks:
@@ -199,27 +412,12 @@ class _ChemistsERIs:
         write_count = 0
         for itask in range(ntasks):
             if itask >= len(tasks):
-                if hasattr(with_df,'j3c'):
-                    j3c = with_df.j3c.read([])
-                    j3c = with_df.j3c.read([])
                 continue
             ikp, ikq, ikr = tasks[itask]
             iks = kconserv[ikp,ikq,ikr]
-            eri_kpt = fao2mo((mo_coeff[ikp],mo_coeff[ikq],mo_coeff[ikr],mo_coeff[iks]),
-                             (kpts[ikp],kpts[ikq],kpts[ikr],kpts[iks]), compact=False)
-            if dtype == np.float: eri_kpt = eri_kpt.real
-            eri_kpt = eri_kpt.reshape(nmo, nmo, nmo, nmo) / nkpts
             done = np.zeros([nkpts,nkpts,nkpts])
             for (kp, kq, kr) in khelper.symm_map[(ikp, ikq, ikr)]:
                 if done[kp,kq,kr]: continue
-                eri_kpt_symm = khelper.transform_symm(eri_kpt, kp, kq, kr)
-                oooo = eri_kpt_symm[:nocc,:nocc,:nocc,:nocc].ravel()
-                ooov = eri_kpt_symm[:nocc,:nocc,:nocc,nocc:].ravel()
-                ovov = eri_kpt_symm[:nocc,nocc:,:nocc,nocc:].ravel()
-                oovv = eri_kpt_symm[:nocc,:nocc,nocc:,nocc:].ravel()
-                ovvo = eri_kpt_symm[:nocc,nocc:,nocc:,:nocc].ravel()
-                ovvv = eri_kpt_symm[:nocc,nocc:,nocc:,nocc:].ravel()
-                vvvv = eri_kpt_symm[nocc:,nocc:,nocc:,nocc:].ravel()
                 ks = kconserv[kp,kq,kr]
                 eia = _get_epq([0,nocc,kp,mo_e_o,nonzero_opadding],
                                [0,nvir,kq,mo_e_v,nonzero_vpadding],
@@ -228,38 +426,35 @@ class _ChemistsERIs:
                                [0,nvir,ks,mo_e_v,nonzero_vpadding],
                                fac=[1.0,-1.0])
                 eijab = eia[:,None,:,None] + ejb[None,:,None,:]
-
-                off = kp * nkpts**2 + kq * nkpts + kr
-                self.oooo.write(off*idx_oooo.size+idx_oooo, oooo)
-                self.ooov.write(off*idx_ooov.size+idx_ooov, ooov)
-                self.ovov.write(off*idx_ovov.size+idx_ovov, ovov)
-                self.oovv.write(off*idx_oovv.size+idx_oovv, oovv)
-                self.ovvo.write(off*idx_ovvo.size+idx_ovvo, ovvo)
-                self.ovvv.write(off*idx_ovvv.size+idx_ovvv, ovvv)
-                self.vvvv.write(off*idx_vvvv.size+idx_vvvv, vvvv)
                 off = kp * nkpts**2 + kr * nkpts + kq
                 self.eijab.write(off*idx_oovv.size+idx_oovv, eijab.ravel())
                 done[kp,kq,kr] = 1
                 write_count += 1
-        for i in range(nwrite_max-write_count):
-            self.oooo.write([], [])
-            self.ooov.write([], [])
-            self.ovov.write([], [])
-            self.oovv.write([], [])
-            self.ovvo.write([], [])
-            self.ovvv.write([], [])
-            self.vvvv.write([], [])
-            self.eijab.write([], [])
-        log.timer("ao2mo transformation", *cput0)
 
+        for i in range(nwrite_max-write_count):
+            self.eijab.write([], [])
+
+        if type(cc._scf.with_df) is df.FFTDF:
+            _make_fftdf_eris(cc, self)
+        else:
+            from cc_sym import mpigdf
+            if type(cc._scf.with_df) is mpigdf.GDF:
+                _make_df_eris(cc, self)
+            elif type(cc._scf.with_df) is df.GDF:
+                log.warn("GDF converted to an MPIGDF object")
+                cc._scf.with_df = mpigdf.from_serial(cc._scf.with_df)
+                _make_df_eris(cc, self)
+            else:
+                raise NotImplementedError("DF object not recognized")
+        log.timer("ao2mo transformation", *cput0)
 
 if __name__ == '__main__':
     from pyscf.pbc import gto, scf, cc
     import os
     cell = gto.Cell()
     cell.atom='''
-    C 0.000000000000   0.000000000000   0.000000000000
-    C 1.685068664391   1.685068664391   1.685068664391
+    H 0.000000000000   0.000000000000   0.000000000000
+    H 1.685068664391   1.685068664391   1.685068664391
     '''
     cell.basis = 'gth-szv'
     cell.pseudo = 'gth-pade'
@@ -268,40 +463,18 @@ if __name__ == '__main__':
     3.370137329, 0.000000000, 3.370137329
     3.370137329, 3.370137329, 0.000000000'''
     cell.unit = 'B'
-    cell.verbose = 5
-    cell.mesh = [5,5,5]
+    cell.mesh = [15,15,15]
+    cell.verbose = 4
     cell.build()
 
     kpts = cell.make_kpts([1,1,3])
     mf = scf.KRHF(cell,kpts, exxdiv=None)
-    chkfile = 'dmd_113.chk'
-    if os.path.isfile(chkfile):
-        mf.__dict__.update(scf.chkfile.load(chkfile, 'scf'))
-    else:
-        mf.chkfile = chkfile
+
+    if rank==0:
         mf.kernel()
+
+    comm.barrier()
+    mf.mo_coeff = comm.bcast(mf.mo_coeff, root=0)
+    mf.mo_occ = comm.bcast(mf.mo_occ, root=0)
     mycc = KRCCSD(mf)
-    mycc.max_cycle=100
-    eris = mycc.ao2mo()
-    _, t1, t2 = mycc.init_amps(eris)
-    t10, t20 = mycc.update_amps(t1, t2, eris)
-    '''
-    refcc = cc.KRCCSD(mf)
-
-    erisref = refcc.ao2mo()
-    _, t1r, t2r= refcc.init_amps(erisref)
-    t1r0, t2r0= refcc.update_amps(t1r, t2r, erisref)
-
-    print(np.linalg.norm(eris.oooo.transpose(0,2,1,3).array.to_nparray()-erisref.oooo))
-    print(np.linalg.norm(eris.ooov.transpose(0,2,1,3).array.to_nparray()-erisref.ooov))
-    print(np.linalg.norm(eris.ovov.transpose(0,2,1,3).array.to_nparray()-erisref.oovv))
-    print(np.linalg.norm(eris.oovv.transpose(0,2,1,3).array.to_nparray()-erisref.ovov))
-    print(np.linalg.norm(eris.ovvo.transpose(2,0,3,1).array.to_nparray()-erisref.voov))
-    print(np.linalg.norm(eris.ovvv.transpose(2,0,3,1).array.to_nparray()-erisref.vovv))
-    print(np.linalg.norm(eris.vvvv.transpose(0,2,1,3).array.to_nparray()-erisref.vvvv))
-
-    print("t1", np.linalg.norm(t10.array.to_nparray()-t1r0))
-    print("t2", np.linalg.norm(t20.array.to_nparray()-t2r0))
-    '''
     mycc.kernel()
-    #refcc.kernel()

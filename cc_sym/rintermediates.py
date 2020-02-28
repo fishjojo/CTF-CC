@@ -1,4 +1,7 @@
 #!/usr/bin/env python
+#
+# Author: Yang Gao <younggao1994@gmail.com>
+#
 def cc_Foo(t1, t2, eris):
     lib = eris.lib
     Fki  = 2*lib.einsum('kcld,ilcd->ki', eris.ovov, t2)

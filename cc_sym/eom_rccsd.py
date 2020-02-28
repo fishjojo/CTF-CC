@@ -1,17 +1,21 @@
+#!/usr/bin/env python
+#
+# Author: Yang Gao <younggao1994@gmail.com>
+#
 from pyscf.cc.eom_rccsd import EOM
 from pyscf import lib as pyscflib
 import numpy as np
 import time
 import cc_sym.rintermediates as imd
 import ctf
-from cc_sym import rccsd
 import symtensor.sym_ctf as lib
+from cc_sym import settings
+comm = settings.comm
+rank = settings.rank
+size = settings.size
+Logger = settings.Logger
 
-rank = rccsd.rank
-comm = rccsd.comm
-size = rccsd.size
 tensor = lib.tensor
-Logger = rccsd.Logger
 
 def kernel(eom, nroots=1, koopmans=True, guess=None, left=False,
            eris=None, imds=None, partition=None, kptlist=None,
@@ -38,7 +42,7 @@ def kernel(eom, nroots=1, koopmans=True, guess=None, left=False,
     else:
         user_guess = False
         guess = eom.get_init_guess(nroots, koopmans, diag)
-    conv, evals, evecs = davidson.davidson(matvec, size, nroots, backend=eom._backend, x0=guess, Adiag=diag, verbose=eom.verbose)
+    conv, evals, evecs = davidson.davidson(matvec, size, nroots, x0=guess, Adiag=diag, verbose=eom.verbose)
     evals = evals.real
     for n, en, vn in zip(range(nroots), evals, evecs):
         r1, r2 = eom.vector_to_amplitudes(vn)
@@ -266,7 +270,7 @@ class EOMIP(EOM):
             idx = range(self.nocc-nroots, self.nocc)[::-1]
         else:
             if diag is None: diag = self.get_diag()
-            idx = self.backend.to_nparray(diag).argsort()[:nroots]
+            idx = diag.to_nparray().argsort()[:nroots]
         guess = ctf.zeros([nroots,size], dtype)
         idx = np.arange(nroots)*size + np.asarray(idx)
         if rank==0:
@@ -417,20 +421,19 @@ if __name__ == '__main__':
     mol.verbose = 5
     mol.spin = 0
     mol.build()
-    mf = scf.RHF(mol).run(conv_tol=1e-14)
+
+    mf = scf.RHF(mol)
+    if rank==0:
+        mf.kernel()
+
+    comm.barrier()
+    mf.mo_coeff = comm.bcast(mf.mo_coeff, root=0)
+    mf.mo_occ = comm.bcast(mf.mo_occ, root=0)
 
     mycc = RCCSD(mf)
-    #mycc = RCCSD(mf)
-    ecc, t1, t2 = mycc.kernel()
+    mycc.kernel()
 
-    refcc = cc.RCCSD(mf)
-    refcc.kernel()
-    refeom = cc.eom_rccsd.EOMIP(refcc)
     myeom = EOMIP(mycc)
     myeom.ipccsd(nroots=2)
-    refeom.ipccsd(nroots=2)
-
-    refeom = cc.eom_rccsd.EOMEA(refcc)
     myeom = EOMEA(mycc)
     myeom.eaccsd(nroots=2)
-    refeom.eaccsd(nroots=2)

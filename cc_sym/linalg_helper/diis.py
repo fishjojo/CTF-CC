@@ -2,6 +2,7 @@ import numpy as np
 import scipy.linalg
 from symtensor.settings import load_lib
 import sys
+from pyscf.lib import logger
 
 
 class DIIS(object):
@@ -28,7 +29,7 @@ class DIIS(object):
         self._H = None
         self._xprev = None
         self._err_vec_touched = False
-        self.log = self.backend.Logger(self.stdout, self.verbose)
+        #self.log = self.backend.Logger(self.stdout, self.verbose)
 
     def _store(self, key, value):
         self._buffer[key] = value
@@ -111,6 +112,8 @@ class DIIS(object):
         return xnew.reshape(x.shape)
 
     def extrapolate(self, nd=None):
+        rank = getattr(self.backend, 'rank', 0)
+
         if nd is None:
             nd = self.get_num_vec()
         if nd == 0:
@@ -122,16 +125,16 @@ class DIIS(object):
 
         w, v = scipy.linalg.eigh(h)
         if np.any(abs(w)<1e-14):
-            self.log.debug('Linear dependence found in DIIS error vectors.')
+            if rank==0: logger.debug(self, 'Linear dependence found in DIIS error vectors.')
             idx = abs(w)>1e-14
             c = np.dot(v[:,idx]*(1./w[idx]), np.dot(v[:,idx].T.conj(), g))
         else:
             try:
                 c = np.linalg.solve(h, g)
             except np.linalg.linalg.LinAlgError as e:
-                self.log.warn(' diis singular, eigh(h) %s', w)
+                if rank==0: logger.warn(self, ' diis singular, eigh(h) %s', w)
                 raise e
-        self.log.debug1('diis-c %s', c)
+        if rank==0: logger.debug1(self, 'diis-c %s', c)
 
         xnew = None
         for i, ci in enumerate(c[1:]):

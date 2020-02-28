@@ -5,8 +5,13 @@ import scipy.linalg
 from pyscf import lib
 from symtensor.settings import load_lib
 import sys
+import ctf
+from mpi4py import MPI
+comm = MPI.COMM_WORLD
+rank = comm.Get_rank()
+size = comm.Get_size()
 
-def eigs(matvec, size, nroots, backend = 'numpy', x0=None, Adiag=None, guess=False, verbose=4):
+def eigs(matvec, vecsize, nroots, x0=None, Adiag=None, guess=False, verbose=4):
     '''Davidson diagonalization method to solve A c = E c
     when A is not Hermitian.
     '''
@@ -15,12 +20,12 @@ def eigs(matvec, size, nroots, backend = 'numpy', x0=None, Adiag=None, guess=Fal
     def matvec_args(vec, args=None):
         return matvec(vec)
 
-    nroots = min(nroots, size)
-    conv, e, c = davidson(matvec, size, nroots, backend, x0, Adiag, verbose)
+    nroots = min(nroots, vecsize)
+    conv, e, c = davidson(matvec, vecsize, nroots, x0, Adiag, verbose)
     return conv, e, c
 
 
-def davidson(mult_by_A, N, neig, backend='numpy', x0=None, Adiag=None, verbose=4):
+def davidson(mult_by_A, N, neig, x0=None, Adiag=None, verbose=4):
     """Diagonalize a matrix via non-symmetric Davidson algorithm.
 
     mult_by_A() is a function which takes a vector of length N
@@ -28,10 +33,11 @@ def davidson(mult_by_A, N, neig, backend='numpy', x0=None, Adiag=None, verbose=4
     neig is the number of eigenvalues requested
     """
 
+    if rank==0:
+        log = lib.logger.Logger(sys.stdout, verbose)
+    else:
+        log = lib.logger.Logger(sys.stdout, 0)
 
-    func = load_lib(backend)
-    log = func.Logger(sys.stdout, verbose)
-    rank = getattr(func,'rank',0)
     cput1 = (time.clock(), time.time())
 
     Mmin = min(neig,N)
@@ -48,9 +54,7 @@ def davidson(mult_by_A, N, neig, backend='numpy', x0=None, Adiag=None, verbose=4
             test[i] = 1.0
             Adiag[i] = mult(test)[i]
     else:
-        Adiag = func.to_nparray(Adiag)
-
-
+        Adiag = Adiag.to_nparray()
 
     idx = Adiag.argsort()
     lamda_k_old = 0
@@ -61,38 +65,43 @@ def davidson(mult_by_A, N, neig, backend='numpy', x0=None, Adiag=None, verbose=4
         assert x0.shape == (Mmin,N)
         b = x0.copy()
         Ab = tuple([mult(b[m,:]) for m in range(Mmin)])
-        Ab = func.vstack(Ab).transpose()
+        Ab = ctf.vstack(Ab).transpose()
 
     evals = np.zeros(neig,dtype=np.complex)
     evecs = []
     for istep,M in enumerate(range(Mmin,Mmax+1)):
         if M == Mmin:
-            b = func.zeros((N,M))
-            ind = [i*M+m for m,i in zip(range(M),idx)]
-            fill = np.ones(len(ind))
-            func.write(b, ind, fill)
+            b = ctf.zeros((N,M))
+            if rank==0:
+                ind = [i*M+m for m,i in zip(range(M),idx)]
+                fill = np.ones(len(ind))
+                b.write(ind, fill)
+            else:
+                b.write([],[])
             Ab = tuple([mult(b[:,m]) for m in range(M)])
-            Ab = func.vstack(Ab).transpose()
+            Ab = ctf.vstack(Ab).transpose()
 
         else:
 
-            Ab = func.hstack((Ab, mult(b[:,M-1]).reshape(N,-1)))
+            Ab = ctf.hstack((Ab, mult(b[:,M-1]).reshape(N,-1)))
 
-        Atilde = func.dot(b.conj().transpose(),Ab)
-        Atilde = func.to_nparray(Atilde)
+        Atilde = ctf.dot(b.conj().transpose(),Ab)
+        Atilde = Atilde.to_nparray()
+
         lamda, alpha = diagonalize_asymm(Atilde)
         lamda_k_old, lamda_k = lamda_k, lamda[target]
-        alpha_k = func.astensor(alpha[:,target])
-
+        alpha_k = ctf.astensor(alpha[:,target])
         if M == Mmax:
             break
 
-        q = func.dot( Ab-lamda_k*b, alpha_k)
+        q = ctf.dot( Ab-lamda_k*b, alpha_k)
+        qnorm = ctf.norm(q)
         log.info('davidson istep = %d  root = %d  E = %.15g  dE = %.9g  residual = %.6g',
-                 istep, target, lamda_k.real, (lamda_k - lamda_k_old).real, func.norm(q))
+                 istep, target, lamda_k.real, (lamda_k - lamda_k_old).real, qnorm)
         cput1 = log.timer('davidson iter', *cput1)
-        if func.norm(q) < tol:
-            evecs.append(func.dot(b,alpha_k))
+
+        if ctf.norm(q) < tol:
+            evecs.append(ctf.dot(b,alpha_k))
             evals[target] = lamda_k
             if target == neig-1:
                 conv = True
@@ -101,11 +110,10 @@ def davidson(mult_by_A, N, neig, backend='numpy', x0=None, Adiag=None, verbose=4
                 target += 1
         eps = 1e-10
         xi = q/(lamda_k-Adiag+eps)
-        bxi,R = func.qr(func.hstack((b,xi.reshape(N,-1))))
+        bxi,R = ctf.qr(ctf.hstack((b,xi.reshape(N,-1))))
         nlast = bxi.shape[-1] - 1
-        b = func.hstack((b,bxi[:,nlast].reshape(N,-1))) #can not replace nlast with -1, (inconsistent between numpy and ctf)
-
-    evecs = func.vstack(tuple(evecs))
+        b = ctf.hstack((b,bxi[:,nlast].reshape(N,-1))) #can not replace nlast with -1, (inconsistent between numpy and ctf)
+    evecs = ctf.vstack(tuple(evecs))
 
     return conv, evals, evecs
 

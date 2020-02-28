@@ -1,18 +1,26 @@
+#!/usr/bin/env python
+#
+# Author: Yang Gao <younggao1994@gmail.com>
+#
 from pyscf.pbc import df
 import numpy as np
-from symtensor.backend.ctf_funclib import static_partition, rank, comm, size
+from cc_sym import rccsd
 import ctf
-from symtensor import sym_ctf, sym
+import symtensor.sym_ctf as lib
 from pyscf.pbc.lib.kpts_helper import (is_zero, gamma_point, member, unique,
                                        KPT_DIFF_TOL)
 import time
-from pyscf.pbc.df.df_jk import zdotCN, zdotNN, zdotNC
 from pyscf import lib as pyscflib
-from pyscf.pbc.df.df import LINEAR_DEP_THR
 from pyscf.pbc.df import ft_ao
 import scipy
-from pyscf import __config__
 from pyscf.pbc.df.fft_ao2mo import _format_kpts, _iskconserv
+
+rank = rccsd.rank
+comm = rccsd.comm
+size = rccsd.size
+tensor = lib.tensor
+Logger = rccsd.Logger
+static_partition = rccsd.static_partition
 
 def get_member(kpti, kptj, kptij_lst):
     kptij = np.vstack((kpti,kptj))
@@ -24,10 +32,19 @@ def get_member(kpti, kptj, kptij_lst):
         dagger = True
     return ijid, dagger
 
-def ao2mo(mydf, mo_coeffs, kpts=None,
-            compact=getattr(__config__, 'pbc_df_ao2mo_general_compact', True)):
+def ao2mo(mydf, mo_coeffs, kpts):
+    """
+    For ctf, this function needs to be used with caution,
+    this function calls read on j3c twice, if other process does not explicitly perform ao2mo transformation, j3c needs to be read twice
+    eg,
+    if rank==0:
+        eri = mydf.ao2mo(mo_coeffs, kpts)
+    else:
+        mydf.j3c.read([])
+        mydf.j3c.read([])
+    """
     if mydf.j3c is None: mydf.build()
-    log = mydf.log
+    log = Logger(mydf.stdout, mydf.verbose)
     cell = mydf.cell
     kptijkl = _format_kpts(kpts)
     kpti, kptj, kptk, kptl = kptijkl
@@ -60,13 +77,21 @@ def ao2mo(mydf, mo_coeffs, kpts=None,
     rLs = np.dot(mo_coeffs[3].T, rvL).transpose(1,2,0)
     rvL = klL = None
     eri = np.dot(pqL,rLs)
-
     return eri
 
-def get_eri(mydf, kpts=None,
-            compact=getattr(__config__, 'pbc_df_ao2mo_general_compact', True)):
+def get_eri(mydf, kpts=None):
+    """
+    For ctf, this function needs to be used with caution,
+    this function calls read on j3c twice, if other process does not explicitly call this func, j3c still needs to be read twice
+    eg,
+    if rank==0:
+        eri = mydf.get_eri(kpts)
+    else:
+        mydf.j3c.read([])
+        mydf.j3c.read([])
+    """
     if mydf.j3c is None: mydf.build()
-    log = mydf.log
+    log = Logger(mydf.stdout, mydf.verbose)
     cell = mydf.cell
     kptijkl = _format_kpts(kpts)
     kpti, kptj, kptk, kptl = kptijkl
@@ -93,7 +118,53 @@ def get_eri(mydf, kpts=None,
     eri = np.dot(ijL,klL.transpose(0,2,1))
     return eri
 
-def dump_to_file(mydf, cderi_file):
+def from_serial(mydf):
+    """
+    convert a serial pyscf.pbc.df.GDF object to cc_sym.mpigdf.GDF object
+    only one process is used for reading from disk
+    """
+    newdf = GDF(mydf.cell, mydf.kpts)
+    if mydf._cderi is None:
+        newdf.build()
+        return newdf
+    import h5py
+    kptij_lst = None
+    auxcell = df.df.make_modrho_basis(mydf.cell, mydf.auxbasis, mydf.exp_to_discard)
+    nao, naux = mydf.cell.nao_nr(), auxcell.nao_nr()
+    if rank==0:
+        feri = h5py.File(mydf._cderi,'r')
+        kptij_lst = np.asarray(feri['j3c-kptij'])
+    else:
+        feri = None
+    kptij_lst = comm.bcast(kptij_lst, root=0)
+    newdf.auxcell = auxcell
+    newdf.kptij_lst = kptij_lst
+    j3c = ctf.zeros([len(kptij_lst), nao, nao, naux], dtype=np.complex128)
+    for i in range(len(kptij_lst)):
+        if rank==0:
+            idx_j3c = np.arange(nao**2*naux)
+            tmp = np.asarray([feri['j3c/%d/%d'%(i,istep)] for istep in range(len(feri['j3c/%d'%i]))])[0]
+            kpti_kptj = kptij_lst[i]
+            is_real = is_zero(kpti_kptj[0]-kpti_kptj[1])
+            if is_real:
+                tmp = pyscflib.unpack_tril(tmp)
+            else:
+                tmp = tmp.reshape(naux,nao,nao)
+            tmp = tmp.transpose(1,2,0)
+            j3c.write(i*idx_j3c.size+idx_j3c, tmp.ravel())
+        else:
+            j3c.write([],[])
+    newdf.j3c = j3c
+    return newdf
+
+def dump_to_file(mydf, cderi_file=None):
+    """
+    dump the eri from mpigdf.GDF object to file
+    only one process used for writing to disk
+    """
+    if cderi_file is None:
+        import tempfile
+        cderi_file = tempfile.NamedTemporaryFile(dir=pyscflib.param.TMPDIR).name
     import h5py
     if rank==0:
         feri = h5py.File(cderi_file,'w')
@@ -123,36 +194,31 @@ def dump_to_file(mydf, cderi_file):
     mydf._cderi = cderi_file
     return mydf
 
-
-
 def _make_j3c(mydf, cell, auxcell, kptij_lst):
-    t1 = (time.clock(), time.time())
     max_memory = max(2000, mydf.max_memory-pyscflib.current_memory()[0])
     fused_cell, fuse = df.df.fuse_auxcell(mydf, auxcell)
-    log, backend = mydf.log, mydf.backend
+    log = Logger(mydf.stdout, mydf.verbose)
     nao, nfao = cell.nao_nr(), fused_cell.nao_nr()
     jobs = np.arange(fused_cell.nbas)
     tasks = list(static_partition(jobs))
     ntasks = max(comm.allgather(len(tasks)))
-    j3c_junk = backend.zeros([len(kptij_lst), nao**2, nfao], dtype=np.complex128)
-    t1 = (time.clock(), time.time())
+    j3c_junk = ctf.zeros([len(kptij_lst), nao**2, nfao], dtype=np.complex128)
+    t1 =  t0 = (time.clock(), time.time())
 
-    for itask in range(ntasks):
-        if itask >= len(tasks):
-            backend.write(j3c_junk, [], [])
-            continue
-        shls_slice = (0, cell.nbas, 0, cell.nbas, tasks[itask], tasks[itask]+1)
-        bstart, bend = fused_cell.ao_loc_nr()[tasks[itask]], fused_cell.ao_loc_nr()[tasks[itask]+1]
-        idx = np.arange(len(kptij_lst)*nao**2) * nfao
-        idx = idx[:,None] + np.arange(bstart,bend)[None,:]
-        idx = idx.ravel()
+    idx_full = np.arange(j3c_junk.size).reshape(j3c_junk.shape)
+    if len(tasks) > 0:
+        q0, q1 = tasks[0], tasks[-1] + 1
+        shls_slice = (0, cell.nbas, 0, cell.nbas, q0, q1)
+        bstart, bend = fused_cell.ao_loc_nr()[q0], fused_cell.ao_loc_nr()[q1]
+        idx = idx_full[:,:,bstart:bend].ravel()
         tmp = df.incore.aux_e2(cell, fused_cell, intor='int3c2e', aosym='s2', kptij_lst=kptij_lst, shls_slice=shls_slice)
-        
-        print("rank=%i, j3c_junk size=%i"%(rank, idx.size))
         nao_pair = nao**2
         if tmp.shape[-2] != nao_pair and tmp.ndim == 2:
             tmp = pyscflib.unpack_tril(tmp, axis=0).reshape(nao_pair,-1)
-        backend.write(j3c_junk, idx, tmp.ravel())
+        j3c_junk.write(idx, tmp.ravel())
+    else:
+        j3c_junk.write([],[])
+
     t1 = log.timer('j3c_junk', *t1)
 
     naux = auxcell.nao_nr()
@@ -174,7 +240,7 @@ def _make_j3c(mydf, cell, auxcell, kptij_lst):
 
     blksize = max(2048, int(max_memory*.5e6/16/fused_cell.nao_nr()))
     log.debug2('max_memory %s (MB)  blocksize %s', max_memory, blksize)
-    j2c  = backend.zeros([len(uniq_kpts),naux,naux], dtype=np.complex128)
+    j2c  = ctf.zeros([len(uniq_kpts),naux,naux], dtype=np.complex128)
 
     a = cell.lattice_vectors() / (2*np.pi)
     def kconserve_indices(kpt):
@@ -286,25 +352,15 @@ def _make_j3c(mydf, cell, auxcell, kptij_lst):
     return None
 
 
-class MPIGDF(df.GDF):
-    def __init__(self, cell, kpts=np.zeros((1,3)), backend='numpy'):
-        if backend=='numpy':
-            self.lib = sym
-        elif backend =='ctf':
-            self.lib = sym_ctf
-        else:
-            raise NotImplementedError
-        self._backend = backend
-        self.backend =  self.lib.backend
-        self.verbose = 5
+class GDF(df.GDF):
+    def __init__(self, cell, kpts=np.zeros((1,3))):
+        self.verbose = cell.verbose
         self.j3c = None
-        self.log = self.backend.Logger(self.stdout, self.verbose)
         self.kptij_lst = None
         df.GDF.__init__(self, cell, kpts)
-        #del self._cderi_to_save
 
     def dump_flags(self, verbose=None):
-        log = self.log
+        log = Logger(self.stdout, self.verbose)
         log.info('\n')
         log.info('******** %s ********', self.__class__)
         log.info('mesh = %s (%d PWs)', self.mesh, np.prod(self.mesh))
@@ -322,7 +378,7 @@ class MPIGDF(df.GDF):
         return self
 
     def build(self, j_only=None, with_j3c=True, kpts_band=None):
-        log = self.log
+        log = Logger(self.stdout, self.verbose)
         if self.kpts_band is not None:
             self.kpts_band = np.reshape(self.kpts_band, (-1,3))
         if kpts_band is not None:
@@ -361,6 +417,7 @@ class MPIGDF(df.GDF):
         return self
 
     dump_to_file = dump_to_file
+    from_serial = from_serial
     _make_j3c = _make_j3c
     get_eri = get_eri
     ao2mo = ao2mo
@@ -373,44 +430,29 @@ if __name__ == '__main__':
     H 0.000000000000   0.000000000000   0.000000000000
     H 1.685068664391   1.685068664391   1.685068664391
     '''
-    cell.basis = 'gth-tzvp'
+    cell.basis = 'gth-szv'
     cell.pseudo = 'gth-pade'
     cell.a = '''
     0.000000000, 3.370137329, 3.370137329
     3.370137329, 0.000000000, 3.370137329
     3.370137329, 3.370137329, 0.000000000'''
     cell.unit = 'B'
-    cell.verbose = 4
+    cell.verbose = 5
     cell.build()
 
     kpts = cell.make_kpts([1,1,3])
-    mydf = MPIGDF(cell, kpts, backend='ctf')
+    mydf = GDF(cell, kpts)
     mydf.mesh = [5,5,5]
     mydf.build()
 
+    mydf.dump_to_file('erimpi.int')
+
     if rank==0:
         mf = scf.KRHF(cell, kpts)
-        mydf.dump_to_file('erimpi.int')
-        mf.with_df = mydf # USING MPIGDF ERI FILE for SCF
+        mf.with_df = mydf # USING ERI FILE from MPIGDF for SCF
         mf.kernel()
 
         mf= scf.KRHF(cell,kpts)
         mf.with_df = df.GDF(cell,kpts) # USING SERIAL GDF ERI
         mf.with_df.mesh = [5,5,5]
         mf.kernel()
-
-    comm.Barrier()
-    nao, nkpts = cell.nao_nr(), len(kpts)
-    mo_coeff = np.random.random([nkpts, nao, nao])
-    from pyscf.pbc.lib import kpts_helper
-    kconserv = kpts_helper.get_kconserv(cell, kpts)
-    for k0 in range(nkpts):
-        for k1 in range(nkpts):
-            for k2 in range(nkpts):
-                k3 = kconserv[k0,k1,k2]
-                eri_mo = mydf.ao2mo((mo_coeff[k0], mo_coeff[k1], mo_coeff[k2], mo_coeff[k3]), (kpts[k0], kpts[k1], kpts[k2], kpts[k3]), compact=False)
-                eri_ao = mydf.get_eri((kpts[k0], kpts[k1], kpts[k2], kpts[k3]), compact=False)
-                eri_mo2 = mf.with_df.ao2mo((mo_coeff[k0], mo_coeff[k1], mo_coeff[k2], mo_coeff[k3]), (kpts[k0], kpts[k1], kpts[k2], kpts[k3]), compact=False).reshape(nao,nao,nao,nao)
-                eri_ao2 = mf.with_df.get_eri((kpts[k0], kpts[k1], kpts[k2], kpts[k3]), compact=False).reshape(nao,nao,nao,nao)
-                print(k0,k1,k2,k3)
-                print(np.linalg.norm(eri_ao-eri_ao2), np.linalg.norm(eri_mo-eri_mo2))

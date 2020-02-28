@@ -1,6 +1,7 @@
 #!/usr/bin/env python
-
-
+#
+# Author: Yang Gao <younggao1994@gmail.com>
+#
 '''
 Restricted CCSD with ctf
 '''
@@ -14,28 +15,18 @@ from pyscf import ao2mo, gto
 from pyscf.ao2mo import _ao2mo
 from symtensor import sym_ctf as lib
 import ctf
-from mpi4py import MPI
 from cc_sym.linalg_helper.diis import DIIS
 import cc_sym.rintermediates as imd
 
-comm = MPI.COMM_WORLD
-rank = comm.Get_rank()
-size = comm.Get_size()
+from cc_sym import settings
+comm = settings.comm
+rank = settings.rank
+size = settings.size
+Logger = settings.Logger
+static_partition = settings.static_partition
+
 tensor = lib.tensor
 zeros = lib.zeros
-
-def static_partition(tasks):
-    segsize = (len(tasks)+size-1) // size
-    start = rank * segsize
-    stop = min(len(tasks), start+segsize)
-    return tasks[start:stop]
-
-class Logger(pyscflib.logger.Logger):
-    def __init__(self, stdout, verbose):
-        if rank == 0:
-            pyscflib.logger.Logger.__init__(self, stdout, verbose)
-        else:
-            pyscflib.logger.Logger.__init__(self, stdout, 0)
 
 def kernel(mycc, eris, t1, t2):
     if eris is None: eris = mycc.ao2mo(self.mo_coeff)
@@ -247,6 +238,24 @@ class RCCSD(ccsd.CCSD):
     def kernel(self, t1=None, t2=None, eris=None, mbpt2=False, cc2=False):
         return self.ccsd(t1, t2, eris, mbpt2, cc2)
 
+    def ipccsd(self, nroots=1, koopmans=True, guess=None, left=False,
+               eris=None, imds=None, partition=None, kptlist=None,
+               dtype=None, **kwargs):
+        from cc_sym.eom_rccsd import EOMIP
+        myeom = EOMIP(self)
+        return myeom.kernel(nroots, koopmans, guess, left,
+                   eris, imds, partition, kptlist,
+                   dtype, **kwargs)
+
+    def eaccsd(self, nroots=1, koopmans=True, guess=None, left=False,
+               eris=None, imds=None, partition=None, kptlist=None,
+               dtype=None, **kwargs):
+        from cc_sym.eom_rccsd import EOMEA
+        myeom = EOMEA(self)
+        return myeom.kernel(nroots, koopmans, guess, left,
+                   eris, imds, partition, kptlist,
+                   dtype, **kwargs)
+
     def ccsd(self, t1=None, t2=None, eris=None, mbpt2=False, cc2=False):
         if mbpt2 and cc2:
             raise RuntimeError('MBPT2 and CC2 are mutually exclusive approximations to the CCSD ground state.')
@@ -426,7 +435,6 @@ def _make_ao_ints(mol, mo_coeff, nocc, dtype):
 
 if __name__ == '__main__':
     from pyscf import scf
-    from pyscf import gto
     import os
 
     mol = gto.Mole()
@@ -435,32 +443,17 @@ if __name__ == '__main__':
         [1 , (0. , -0.757 , 0.587)],
         [1 , (0. , 0.757  , 0.587)]]
     mol.basis = 'cc-pvdz'
-    mol.verbose = 0
+    mol.verbose = 4
     mol.spin = 0
     mol.build()
-    mol.verbose=5
-    fn = 'molscf.chk'
+
+    mf = scf.RHF(mol)
     if rank==0:
-        mf = scf.RHF(mol)
-        if os.path.isfile(fn):
-            mf.__dict__.update(scf.chkfile.load(fn,'scf'))
-        else:
-            #mf.max_cycle=2
-            mf.chkfile = fn
-            mf.kernel()
-    else:
-        mf = scf.RHF(mol)
+        mf.kernel()
 
-    mo_coeff  = comm.bcast(mf.mo_coeff, root=0)
-    mo_occ = comm.bcast(mf.mo_occ, root=0)
-    mf.mo_coeff = mo_coeff
-    mf.mo_occ = mo_occ
+    comm.barrier()
+    mf.mo_coeff  = comm.bcast(mf.mo_coeff, root=0)
+    mf.mo_occ = comm.bcast(mf.mo_occ, root=0)
+
     mycc = RCCSD(mf)
-    mycc.verbose=5
-    #mycc.max_cycle=1
     mycc.kernel()
-
-
-    #from pyscf.cc.rccsd_slow import RCCSD as REFCCSD
-    #refcc2 = REFCCSD(mf)
-    #refcc2.kernel()
