@@ -3,20 +3,13 @@
 # Author: Yang Gao <younggao1994@gmail.com>
 #
 from pyscf.cc.eom_rccsd import EOM
-from pyscf import lib as pyscflib
 import numpy as np
 import time
 import cc_sym.rintermediates as imd
-import ctf
-import symtensor.sym_ctf as lib
-from cc_sym import settings
-comm = settings.comm
-rank = settings.rank
-size = settings.size
-Logger = settings.Logger
+import symtensor.sym as lib
+from pyscf.lib.logger import Logger
 
 tensor = lib.tensor
-
 def kernel(eom, nroots=1, koopmans=True, guess=None, left=False,
            eris=None, imds=None, partition=None, kptlist=None,
            dtype=None, **kwargs):
@@ -30,7 +23,7 @@ def kernel(eom, nroots=1, koopmans=True, guess=None, left=False,
 
     size = eom.vector_size()
     nroots = min(nroots,size)
-    from cc_sym.linalg_helper import davidson
+    from pyscf.pbc.lib.linalg_helper import eigs
 
     matvec, diag = eom.gen_matvec(imds, left=left, **kwargs)
     user_guess = False
@@ -42,9 +35,9 @@ def kernel(eom, nroots=1, koopmans=True, guess=None, left=False,
     else:
         user_guess = False
         guess = eom.get_init_guess(nroots, koopmans, diag)
-    conv, evals, evecs = davidson.davidson(matvec, size, nroots, x0=guess, Adiag=diag, verbose=eom.verbose)
+    conv, evals, evecs = eigs(matvec, size, nroots, x0=guess, Adiag=diag, verbose=eom.verbose)
     evals = evals.real
-    for n, en, vn in zip(range(nroots), evals, evecs):
+    for n, en, vn in zip(range(nroots), evals, evecs.T):
         r1, r2 = eom.vector_to_amplitudes(vn)
         qp_weight = r1.norm()**2
         log.info('EOM-CCSD root %d E = %.16g  qpwt = %0.6g', n, en, qp_weight)
@@ -52,7 +45,7 @@ def kernel(eom, nroots=1, koopmans=True, guess=None, left=False,
     return conv, evals, evecs
 
 def amplitudes_to_vector(eom, r1, r2):
-    vector = ctf.hstack((r1.array.ravel(), r2.array.ravel()))
+    vector = np.hstack((r1.array.ravel(), r2.array.ravel()))
     return vector
 
 def vector_to_amplitudes_ip(eom, vector):
@@ -128,10 +121,10 @@ def ipccsd_diag(eom, imds=None):
         ijb = ijb + fvv.diagonal().reshape(1,1,nvir)
         Hr2 = tensor(ijb)
     else:
-        wij = ctf.einsum('ijij->ij', imds.Woooo.array)
-        wjb = ctf.einsum('jbjb->jb', imds.Wovov.array)
-        wjb2 = ctf.einsum('jbbj->jb', imds.Wovvo.array)
-        wib = ctf.einsum('ibib->ib', imds.Wovov.array)
+        wij = np.einsum('ijij->ij', imds.Woooo.array)
+        wjb = np.einsum('jbjb->jb', imds.Wovov.array)
+        wjb2 = np.einsum('jbbj->jb', imds.Wovvo.array)
+        wib = np.einsum('ibib->ib', imds.Wovov.array)
         ijb  = imds.Lvv.diagonal().reshape(1,1,nvir)
         ijb = ijb - imds.Loo.diagonal().reshape(nocc,1,1)
         ijb = ijb -imds.Loo.diagonal().reshape(1,nocc,1)
@@ -139,7 +132,7 @@ def ipccsd_diag(eom, imds=None):
         ijb = ijb + wij.reshape(nocc,nocc,1)
         ijb = ijb - wjb.reshape(1,nocc,nvir)
         ijb = ijb + 2*wjb2.reshape(1,nocc,nvir)
-        ijb = ijb - ctf.einsum('ij,jb->ijb', ctf.eye(nocc), wjb2)
+        ijb = ijb - np.einsum('ij,jb->ijb', np.eye(nocc), wjb2)
         ijb = ijb - wib.reshape(nocc,1,nvir)
         Hr2 = tensor(ijb)
         Hr2 -= 2.*lib.einsum('ijcb,jibc->ijb', t2, imds.Woovv)
@@ -208,14 +201,14 @@ def eaccsd_diag(eom, imds=None):
         jab = imds.Lvv.diagonal().reshape(1,nvir,1)
         jab = jab + imds.Lvv.diagonal().reshape(1,1,nvir)
         jab = jab - imds.Loo.diagonal().reshape(nocc,1,1)
-        wab = ctf.einsum("abab->ab", imds.Wvvvv.array)
-        wjb = ctf.einsum('jbjb->jb', imds.Wovov.array)
-        wjb2 = ctf.einsum('jbbj->jb', imds.Wovvo.array)
-        wja = ctf.einsum('jaja->ja', imds.Wovov.array)
+        wab = np.einsum("abab->ab", imds.Wvvvv.array)
+        wjb = np.einsum('jbjb->jb', imds.Wovov.array)
+        wjb2 = np.einsum('jbbj->jb', imds.Wovvo.array)
+        wja = np.einsum('jaja->ja', imds.Wovov.array)
         jab = jab + wab.reshape(1,nvir,nvir)
         jab = jab - wjb.reshape(nocc,1,nvir)
         jab = jab + 2*wjb2.reshape(nocc,1,nvir)
-        jab -= ctf.einsum('jb,ab->jab', wjb2, ctf.eye(nvir))
+        jab -= np.einsum('jb,ab->jab', wjb2, np.eye(nvir))
         jab = jab - wja.reshape(nocc,nvir,1)
         Hr2 = tensor(jab)
         Hr2 -= 2*lib.einsum('ijab,ijab->jab', t2, imds.Woovv)
@@ -228,7 +221,6 @@ class EOMIP(EOM):
         EOM.__init__(self,cc)
         self.lib = cc.lib
         self.symlib = cc.symlib
-        self._backend = cc._backend
         self.t1, self.t2 = cc.t1, cc.t2
 
     amplitudes_to_vector = amplitudes_to_vector
@@ -249,6 +241,24 @@ class EOMIP(EOM):
         imds.make_ip(self.partition)
         return imds
 
+    def get_init_guess(self, nroots=1, koopmans=True, diag=None):
+        size = self.vector_size()
+        dtype = getattr(diag, 'dtype', np.double)
+        nroots = min(nroots, size)
+        guess = []
+        if koopmans:
+            for n in range(nroots):
+                g = np.zeros(int(size), dtype)
+                g[self.nocc-n-1] = 1.0
+                guess.append(g)
+        else:
+            idx = diag.argsort()[:nroots]
+            for i in idx:
+                g = np.zeros(int(size), dtype)
+                g[i] = 1.0
+                guess.append(g)
+        return np.asarray(guess).T
+
     @property
     def eip(self):
         return self.e
@@ -262,36 +272,6 @@ class EOMIP(EOM):
             matvec = lambda x: self.matvec(x, imds, diag)
         return matvec, diag
 
-    def get_init_guess(self, nroots=1, koopmans=True, diag=None):
-        size = self.vector_size()
-        dtype = getattr(diag, 'dtype', np.double)
-        nroots = min(nroots, size)
-        if koopmans:
-            idx = range(self.nocc-nroots, self.nocc)[::-1]
-        else:
-            if diag is None: diag = self.get_diag()
-            idx = diag.to_nparray().argsort()[:nroots]
-        guess = ctf.zeros([nroots,size], dtype)
-        idx = np.arange(nroots)*size + np.asarray(idx)
-        if rank==0:
-            guess.write(idx, np.ones(nroots))
-        else:
-            guess.write([],[])
-
-        return guess
-
-    def dump_flags(self, verbose=None):
-        if verbose is None: verbose=self.verbose
-        logger = Logger(self.stdout, verbose)
-        logger.info('')
-        logger.info('******** %s ********', self.__class__)
-        logger.info('max_space = %d', self.max_space)
-        logger.info('max_cycle = %d', self.max_cycle)
-        logger.info('conv_tol = %s', self.conv_tol)
-        logger.info('partition = %s', self.partition)
-        logger.info('max_memory %d MB (current use %d MB)',
-                    self.max_memory, pyscflib.current_memory()[0])
-        return self
 
 class EOMEA(EOMIP):
 
@@ -317,17 +297,17 @@ class EOMEA(EOMIP):
         nroots = min(nroots, size)
         guess = []
         if koopmans:
-            idx = range(nroots)
+            for n in range(nroots):
+                g = np.zeros(size, dtype)
+                g[n] = 1.0
+                guess.append(g)
         else:
-            if diag is None: diag = self.get_diag()
-            idx = diag.to_nparray().argsort()[:nroots]
-        guess = ctf.zeros([nroots,size], dtype)
-        idx = np.arange(nroots)*size + np.asarray(idx)
-        if rank==0:
-            guess.write(idx, np.ones(nroots))
-        else:
-            guess.write([], [])
-        return guess
+            idx = diag.argsort()[:nroots]
+            for i in idx:
+                g = np.zeros(size, dtype)
+                g[i] = 1.0
+                guess.append(g)
+        return np.asarray(guess).T
 
     @property
     def eea(self):
@@ -337,6 +317,7 @@ class _IMDS:
     def __init__(self, cc, eris=None):
         self.t1 = cc.t1
         self.t2 = cc.t2
+        self.stdout, self.verbose= cc.stdout, cc.verbose
         if eris is None:
             if cc.eris is None:
                 self.eris = cc.ao2mo()
@@ -346,27 +327,27 @@ class _IMDS:
         self.made_ea_imds = False
         self._made_shared_2e = False
         self.symlib = cc.symlib
-        self.log = Logger(cc.stdout, cc.verbose)
 
     def _make_shared_1e(self):
         cput0 = (time.clock(), time.time())
+        log = Logger(self.stdout, self.verbose)
         t1,t2,eris = self.t1, self.t2, self.eris
         self.Loo = imd.Loo(t1,t2,eris)
         self.Lvv = imd.Lvv(t1,t2,eris)
         self.Fov = imd.cc_Fov(t1,t2,eris)
 
-        self.log.timer('EOM-CCSD shared one-electron intermediates', *cput0)
+        log.timer('EOM-CCSD shared one-electron intermediates', *cput0)
 
     def _make_shared_2e(self):
         cput0 = (time.clock(), time.time())
-
+        log = Logger(self.stdout, self.verbose)
         t1,t2,eris = self.t1, self.t2, self.eris
         # 2 virtuals
         self.Wovov = imd.Wovov(t1,t2,eris)
         self.Wovvo = imd.Wovvo(t1,t2,eris)
         self.Woovv = eris.ovov.transpose(0,2,1,3)
 
-        self.log.timer('EOM-CCSD shared two-electron intermediates', *cput0)
+        log.timer('EOM-CCSD shared two-electron intermediates', *cput0)
 
     def make_ip(self, partition=None):
         self._make_shared_1e()
@@ -375,7 +356,7 @@ class _IMDS:
             self._made_shared_2e = True
 
         cput0 = (time.clock(), time.time())
-
+        log = Logger(self.stdout, self.verbose)
         t1,t2,eris = self.t1, self.t2, self.eris
 
         # 0 or 1 virtuals
@@ -384,7 +365,7 @@ class _IMDS:
         self.Wooov = imd.Wooov(t1,t2,eris)
         self.Wovoo = imd.Wovoo(t1,t2,eris)
         self.made_ip_imds = True
-        self.log.timer('EOM-CCSD IP intermediates', *cput0)
+        log.timer('EOM-CCSD IP intermediates', *cput0)
 
     def make_ea(self, partition=None):
         self._make_shared_1e()
@@ -393,7 +374,7 @@ class _IMDS:
             self._made_shared_2e = True
 
         cput0 = (time.clock(), time.time())
-
+        log = Logger(self.stdout, self.verbose)
         t1,t2,eris = self.t1, self.t2, self.eris
 
         # 3 or 4 virtuals
@@ -404,14 +385,14 @@ class _IMDS:
             self.Wvvvv = imd.Wvvvv(t1,t2,eris)
             self.Wvvvo = imd.Wvvvo(t1,t2,eris,self.Wvvvv)
         self.made_ea_imds = True
-        self.log.timer('EOM-CCSD EA intermediates', *cput0)
+        log.timer('EOM-CCSD EA intermediates', *cput0)
 
     def make_ee(self):
         raise NotImplementedError
 
 if __name__ == '__main__':
     from pyscf import gto, scf, cc
-    from cc_sym.rccsd import RCCSD
+    from cc_sym.rccsd_numpy import RCCSD
     mol = gto.Mole()
     mol.atom = [
         [8 , (0. , 0.     , 0.)],
@@ -423,16 +404,9 @@ if __name__ == '__main__':
     mol.build()
 
     mf = scf.RHF(mol)
-    if rank==0:
-        mf.kernel()
-
-    comm.barrier()
-    mf.mo_coeff = comm.bcast(mf.mo_coeff, root=0)
-    mf.mo_occ = comm.bcast(mf.mo_occ, root=0)
-
+    mf.kernel()
     mycc = RCCSD(mf)
     mycc.kernel()
-
     myeom = EOMIP(mycc)
     myeom.ipccsd(nroots=2)
     myeom = EOMEA(mycc)
