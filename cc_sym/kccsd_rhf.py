@@ -14,7 +14,7 @@ from pyscf.pbc.cc.kccsd_rhf import _get_epq
 import ctf
 from cc_sym import rccsd
 from pyscf.pbc import tools, df
-
+from functools import reduce
 from cc_sym import settings
 comm = settings.comm
 rank = settings.rank
