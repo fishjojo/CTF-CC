@@ -146,7 +146,7 @@ def ipccsd_diag(eom, kshift, imds=None):
             kijb = tasks[itask]
             ki, kj = (kijb).__divmod__(nkpts)
             kb = kconserv[ki,kshift,kj]
-            ijb = np.zeros([nocc,nvir,nvir], dtype=dtype)
+            ijb = np.zeros([nocc,nocc,nvir], dtype=dtype)
             ijb += lvv[kb][None,None,:]
             ijb -= loo[ki][:,None,None]
             ijb -= loo[kj][None,:,None]
