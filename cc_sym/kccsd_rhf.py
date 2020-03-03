@@ -355,12 +355,12 @@ class _ChemistsERIs:
                                 for k, mo in enumerate(mo_coeff)])
         fock = comm.bcast(fock, root=0)
         self.dtype = dtype = np.result_type(*(mo_coeff, fock)).char
-        self.foo = zeros([nocc,nocc], dtype, sym1, symlib=symlib, verbose=mycc.SYMVERBOSE)
-        self.fov = zeros([nocc,nvir], dtype, sym1, symlib=symlib, verbose=mycc.SYMVERBOSE)
-        self.fvv = zeros([nvir,nvir], dtype, sym1, symlib=symlib, verbose=mycc.SYMVERBOSE)
-        self.eia = zeros([nocc,nvir], np.float64, sym1, symlib=symlib, verbose=mycc.SYMVERBOSE)
-        self._foo = zeros([nocc,nocc], dtype, sym1, symlib=symlib, verbose=mycc.SYMVERBOSE)
-        self._fvv = zeros([nvir,nvir], dtype, sym1, symlib=symlib, verbose=mycc.SYMVERBOSE)
+        self.foo = zeros([nocc,nocc], dtype, sym1, symlib=symlib, verbose=cc.SYMVERBOSE)
+        self.fov = zeros([nocc,nvir], dtype, sym1, symlib=symlib, verbose=cc.SYMVERBOSE)
+        self.fvv = zeros([nvir,nvir], dtype, sym1, symlib=symlib, verbose=cc.SYMVERBOSE)
+        self.eia = zeros([nocc,nvir], np.float64, sym1, symlib=symlib, verbose=cc.SYMVERBOSE)
+        self._foo = zeros([nocc,nocc], dtype, sym1, symlib=symlib, verbose=cc.SYMVERBOSE)
+        self._fvv = zeros([nvir,nvir], dtype, sym1, symlib=symlib, verbose=cc.SYMVERBOSE)
 
         foo = fock[:,:nocc,:nocc]
         fov = fock[:,:nocc,nocc:]
@@ -394,7 +394,7 @@ class _ChemistsERIs:
             self._foo.write([],[])
             self._fvv.write([],[])
 
-        self.eijab = zeros([nocc,nocc,nvir,nvir], np.float64, sym2, symlib=symlib, verbose=mycc.SYMVERBOSE)
+        self.eijab = zeros([nocc,nocc,nvir,nvir], np.float64, sym2, symlib=symlib, verbose=cc.SYMVERBOSE)
 
         kconserv = cc.khelper.kconserv
         khelper = cc.khelper
