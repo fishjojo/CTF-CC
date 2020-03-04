@@ -43,7 +43,7 @@ def kernel(eom, nroots=1, koopmans=True, guess=None, left=False,
     evals = np.zeros((len(kptlist),nroots), np.float)
     evecs = []
     convs = np.zeros((len(kptlist),nroots), dtype)
-    from linalg_helper.davidson import eigs
+    from cc_sym.linalg_helper.davidson import eigs
     for k, kshift in enumerate(kptlist):
         matvec, diag = eom.gen_matvec(kshift, imds, left=left, **kwargs)
         eom.update_symlib(kshift)
