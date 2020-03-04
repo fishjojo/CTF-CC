@@ -43,7 +43,7 @@ def kernel(eom, nroots=1, koopmans=True, guess=None, left=False,
     evals = np.zeros((len(kptlist),nroots), np.float)
     evecs = []
     convs = np.zeros((len(kptlist),nroots), dtype)
-    from linalg_helper.davidson import eigs
+    from cc_sym.linalg_helper.davidson import eigs
     for k, kshift in enumerate(kptlist):
         matvec, diag = eom.gen_matvec(kshift, imds, left=left, **kwargs)
         eom.update_symlib(kshift)
@@ -146,7 +146,7 @@ def ipccsd_diag(eom, kshift, imds=None):
             kijb = tasks[itask]
             ki, kj = (kijb).__divmod__(nkpts)
             kb = kconserv[ki,kshift,kj]
-            ijb = np.zeros([nocc,nvir,nvir], dtype=dtype)
+            ijb = np.zeros([nocc,nocc,nvir], dtype=dtype)
             ijb += lvv[kb][None,None,:]
             ijb -= loo[ki][:,None,None]
             ijb -= loo[kj][None,:,None]
