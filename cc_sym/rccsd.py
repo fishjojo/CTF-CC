@@ -57,7 +57,9 @@ def kernel(mycc, eris, t1, t2):
             t2new += (1-alpha) * t2
         t1, t2 = t1new, t2new
         t1new = t2new = None
+        tmpt0 = (time.clock(), time.time())
         t1, t2 = mycc.run_diis(t1, t2, istep, normt, eccsd-eold, adiis)
+        log.timer("running diis", *tmpt0)
         eold, eccsd = eccsd, mycc.energy(t1, t2, eris)
         log.info('cycle = %d  E(CCSD) = %.15g  dE = %.9g  norm(t1,t2) = %.6g',
                  istep+1, eccsd, eccsd - eold, normt)
