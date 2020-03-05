@@ -183,11 +183,12 @@ def energy(cc, t1, t2, eris):
 
 class RCCSD(ccsd.CCSD):
 
-    def __init__(self, mf, frozen=0, mo_coeff=None, mo_occ=None):
+    def __init__(self, mf, frozen=0, mo_coeff=None, mo_occ=None, SYMVERBOSE=0):
         ccsd.CCSD.__init__(self, mf, frozen, mo_coeff, mo_occ)
         self._backend = 'ctf'
         self.symlib = None
         self.lib  = lib
+        self.SYMVERBOSE = SYMVERBOSE
 
     def ao2mo(self, mo_coeff=None):
         return _ChemistsERIs(self, mo_coeff)
@@ -233,8 +234,8 @@ class RCCSD(ccsd.CCSD):
         nov = nocc * nvir
         t1 = vec[:nov].reshape(nocc,nvir)
         t2 = vec[nov:].reshape(nocc,nocc,nvir,nvir)
-        t1  = tensor(t1)
-        t2  = tensor(t2)
+        t1  = tensor(t1, verbose=self.SYMVERBOSE)
+        t2  = tensor(t2, verbose=self.SYMVERBOSE)
         return t1, t2
 
     def kernel(self, t1=None, t2=None, eris=None, mbpt2=False, cc2=False):
@@ -315,10 +316,10 @@ class _ChemistsERIs:
         fock = comm.bcast(fock, root=0)
         self.dtype = dtype = np.result_type(fock)
 
-        self.foo = zeros([nocc,nocc], dtype)
-        self.fov = zeros([nocc,nvir], dtype)
-        self.fvv = zeros([nvir,nvir], dtype)
-        self.eia = zeros([nocc,nvir])
+        self.foo = zeros([nocc,nocc], dtype, verbose=cc.SYMVERBOSE)
+        self.fov = zeros([nocc,nvir], dtype, verbose=cc.SYMVERBOSE)
+        self.fvv = zeros([nvir,nvir], dtype, verbose=cc.SYMVERBOSE)
+        self.eia = zeros([nocc,nvir], verbose=cc.SYMVERBOSE)
 
         if rank==0:
             mo_e = fock.diagonal().real
@@ -336,7 +337,7 @@ class _ChemistsERIs:
         self._foo = self.foo.diagonal(preserve_shape=True)
         self._fvv = self.fvv.diagonal(preserve_shape=True)
         eijab = self.eia.array.reshape(nocc,1,nvir,1) + self.eia.array.reshape(1,nocc,1,nvir)
-        self.eijab = tensor(eijab)
+        self.eijab = tensor(eijab, verbose=cc.SYMVERBOSE)
 
         ppoo, ppov, ppvv = _make_ao_ints(cc.mol, mo_coeff, nocc, dtype)
         cput1 = log.timer('making ao integrals', *cput1)
@@ -359,13 +360,13 @@ class _ChemistsERIs:
         ovvv = ctf.einsum('ucab,ui->icab', tmp, orbo.conj())
         vvvv = ctf.einsum('ucab,ud->dcab', tmp, orbv.conj())
 
-        self.oooo = tensor(oooo)
-        self.ooov = tensor(ooov)
-        self.ovov = tensor(ovov)
-        self.oovv = tensor(oovv)
-        self.ovvo = tensor(ovvo)
-        self.ovvv = tensor(ovvv)
-        self.vvvv = tensor(vvvv)
+        self.oooo = tensor(oooo, verbose=cc.SYMVERBOSE)
+        self.ooov = tensor(ooov, verbose=cc.SYMVERBOSE)
+        self.ovov = tensor(ovov, verbose=cc.SYMVERBOSE)
+        self.oovv = tensor(oovv, verbose=cc.SYMVERBOSE)
+        self.ovvo = tensor(ovvo, verbose=cc.SYMVERBOSE)
+        self.ovvv = tensor(ovvv, verbose=cc.SYMVERBOSE)
+        self.vvvv = tensor(vvvv, verbose=cc.SYMVERBOSE)
         log.timer('ao2mo transformation', *cput0)
 
 def _make_ao_ints(mol, mo_coeff, nocc, dtype):

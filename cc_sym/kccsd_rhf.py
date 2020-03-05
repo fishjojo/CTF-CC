@@ -41,14 +41,13 @@ def energy(cc, t1, t2, eris):
 class KRCCSD(rccsd.RCCSD):
 
     def __init__(self, mf, frozen=0, mo_coeff=None, mo_occ=None, SYMVERBOSE=0):
-        rccsd.RCCSD.__init__(self, mf, frozen, mo_coeff, mo_occ)
+        rccsd.RCCSD.__init__(self, mf, frozen, mo_coeff, mo_occ, SYMVERBOSE)
         self.kpts = mf.kpts
         self.khelper = kpts_helper.KptsHelper(mf.cell, mf.kpts)
         self.max_space = 20
         self._keys = self._keys.union(['max_space'])
         self.symlib = SYMLIB('ctf')
         self.make_symlib()
-        self.SYMVERBOSE=SYMVERBOSE
 
     energy = energy
     get_nocc = get_nocc
