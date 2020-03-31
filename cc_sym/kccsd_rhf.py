@@ -15,7 +15,7 @@ from pyscf.pbc.cc.kccsd_rhf import _get_epq
 import ctf
 from cc_sym import rccsd
 from pyscf.pbc import tools, df
-
+from functools import reduce
 from cc_sym import settings
 comm = settings.comm
 rank = settings.rank
@@ -41,8 +41,8 @@ def energy(cc, t1, t2, eris):
 
 class KRCCSD(rccsd.RCCSD):
 
-    def __init__(self, mf, frozen=0, mo_coeff=None, mo_occ=None):
-        rccsd.RCCSD.__init__(self, mf, frozen, mo_coeff, mo_occ)
+    def __init__(self, mf, frozen=0, mo_coeff=None, mo_occ=None, SYMVERBOSE=0):
+        rccsd.RCCSD.__init__(self, mf, frozen, mo_coeff, mo_occ, SYMVERBOSE)
         self.kpts = mf.kpts
         self.khelper = kpts_helper.KptsHelper(mf.cell, mf.kpts)
         self.max_space = 20
@@ -71,7 +71,7 @@ class KRCCSD(rccsd.RCCSD):
         nkpts = self.nkpts
         gvec = self._scf.cell.reciprocal_vectors()
         sym1 = ['+-', [kpts,]*2, None, gvec]
-        t1 = lib.zeros([nocc,nvir], eris.dtype, sym1, symlib=self.symlib)
+        t1 = lib.zeros([nocc,nvir], eris.dtype, sym1, symlib=self.symlib, verbose=self.SYMVERBOSE)
         t2 = eris.ovov.transpose(0,2,1,3).conj() / eris.eijab
         self.emp2  = 2*lib.einsum('ijab,iajb', t2, eris.ovov)
         self.emp2 -=   lib.einsum('ijab,ibja', t2, eris.ovov)
@@ -101,8 +101,8 @@ class KRCCSD(rccsd.RCCSD):
         gvec = self._scf.cell.reciprocal_vectors()
         sym1 = ['+-',[kpts,]*2, None, gvec]
         sym2 = ['++--',[kpts,]*4, None, gvec]
-        t1  = tensor(t1, sym1, symlib=self.symlib)
-        t2  = tensor(t2, sym2, symlib=self.symlib)
+        t1  = tensor(t1, sym1, symlib=self.symlib, verbose=self.SYMVERBOSE)
+        t2  = tensor(t2, sym2, symlib=self.symlib, verbose=self.SYMVERBOSE)
         return t1, t2
 
     def ipccsd(self, nroots=1, koopmans=False, guess=None, left=False,
@@ -221,14 +221,14 @@ def _make_fftdf_eris(mycc, eris):
     sym1 = ["+-+", [kpts,]*3, None, gvec]
     sym2 = ["+--", [kpts,]*3, None, gvec]
 
-    ooG = tensor(ijG, sym1)
-    ovG = tensor(iaG, sym1)
-    vvG = tensor(abG, sym1)
+    ooG = tensor(ijG, sym1, verbose=mycc.SYMVERBOSE)
+    ovG = tensor(iaG, sym1, verbose=mycc.SYMVERBOSE)
+    vvG = tensor(abG, sym1, verbose=mycc.SYMVERBOSE)
 
-    ooR = tensor(ijR, sym2)
-    ovR = tensor(iaR, sym2)
-    voR = tensor(aiR, sym2)
-    vvR = tensor(abR, sym2)
+    ooR = tensor(ijR, sym2, verbose=mycc.SYMVERBOSE)
+    ovR = tensor(iaR, sym2, verbose=mycc.SYMVERBOSE)
+    voR = tensor(aiR, sym2, verbose=mycc.SYMVERBOSE)
+    vvR = tensor(abR, sym2, verbose=mycc.SYMVERBOSE)
 
     eris.oooo = lib.einsum('ijg,klg->ijkl', ooG, ooR)/ nkpts
     eris.ooov = lib.einsum('ijg,kag->ijka', ooG, ovR)/ nkpts
@@ -307,15 +307,15 @@ def _make_df_eris(mycc, eris):
     sym1 = ["+-+", [kpts,]*3, None, gvec]
     sym2 = ["+--", [kpts,]*3, None, gvec]
 
-    ooL = tensor(ijL, sym1)
-    ovL = tensor(iaL, sym1)
-    voL = tensor(aiL, sym1)
-    vvL = tensor(abL, sym1)
+    ooL = tensor(ijL, sym1, verbose=mycc.SYMVERBOSE)
+    ovL = tensor(iaL, sym1, verbose=mycc.SYMVERBOSE)
+    voL = tensor(aiL, sym1, verbose=mycc.SYMVERBOSE)
+    vvL = tensor(abL, sym1, verbose=mycc.SYMVERBOSE)
 
-    ooL2 = tensor(ijL, sym2)
-    ovL2 = tensor(iaL, sym2)
-    voL2 = tensor(aiL, sym2)
-    vvL2 = tensor(abL, sym2)
+    ooL2 = tensor(ijL, sym2, verbose=mycc.SYMVERBOSE)
+    ovL2 = tensor(iaL, sym2, verbose=mycc.SYMVERBOSE)
+    voL2 = tensor(aiL, sym2, verbose=mycc.SYMVERBOSE)
+    vvL2 = tensor(abL, sym2, verbose=mycc.SYMVERBOSE)
 
     eris.oooo = lib.einsum('ijg,klg->ijkl', ooL, ooL2) / nkpts
     eris.ooov = lib.einsum('ijg,kag->ijka', ooL, ovL2) / nkpts
@@ -355,12 +355,12 @@ class _ChemistsERIs:
                                 for k, mo in enumerate(mo_coeff)])
         fock = comm.bcast(fock, root=0)
         self.dtype = dtype = np.result_type(*(mo_coeff, fock)).char
-        self.foo = zeros([nocc,nocc], dtype, sym1, symlib=symlib)
-        self.fov = zeros([nocc,nvir], dtype, sym1, symlib=symlib)
-        self.fvv = zeros([nvir,nvir], dtype, sym1, symlib=symlib)
-        self.eia = zeros([nocc,nvir], np.float64, sym1, symlib=symlib)
-        self._foo = zeros([nocc,nocc], dtype, sym1, symlib=symlib)
-        self._fvv = zeros([nvir,nvir], dtype, sym1, symlib=symlib)
+        self.foo = zeros([nocc,nocc], dtype, sym1, symlib=symlib, verbose=cc.SYMVERBOSE)
+        self.fov = zeros([nocc,nvir], dtype, sym1, symlib=symlib, verbose=cc.SYMVERBOSE)
+        self.fvv = zeros([nvir,nvir], dtype, sym1, symlib=symlib, verbose=cc.SYMVERBOSE)
+        self.eia = zeros([nocc,nvir], np.float64, sym1, symlib=symlib, verbose=cc.SYMVERBOSE)
+        self._foo = zeros([nocc,nocc], dtype, sym1, symlib=symlib, verbose=cc.SYMVERBOSE)
+        self._fvv = zeros([nvir,nvir], dtype, sym1, symlib=symlib, verbose=cc.SYMVERBOSE)
 
         foo = fock[:,:nocc,:nocc]
         fov = fock[:,:nocc,nocc:]
@@ -394,7 +394,7 @@ class _ChemistsERIs:
             self._foo.write([],[])
             self._fvv.write([],[])
 
-        self.eijab = zeros([nocc,nocc,nvir,nvir], np.float64, sym2, symlib=symlib)
+        self.eijab = zeros([nocc,nocc,nvir,nvir], np.float64, sym2, symlib=symlib, verbose=cc.SYMVERBOSE)
 
         kconserv = cc.khelper.kconserv
         khelper = cc.khelper
