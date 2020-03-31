@@ -2,7 +2,6 @@
 #
 # Author: Yang Gao <younggao1994@gmail.com>
 #
-from functools import reduce
 import time
 import numpy as np
 from pyscf import lib as pyscflib
