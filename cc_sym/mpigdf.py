@@ -2,25 +2,27 @@
 #
 # Author: Yang Gao <younggao1994@gmail.com>
 #
-from pyscf.pbc import df
+
+import time
 import numpy as np
-from cc_sym import rccsd
 import ctf
-import symtensor.sym_ctf as lib
+
+
+from pyscf.pbc import df
+from pyscf import lib as pyscflib
+from pyscf.lib import logger
+from pyscf.pbc.df import ft_ao
 from pyscf.pbc.lib.kpts_helper import (is_zero, gamma_point, member, unique,
                                        KPT_DIFF_TOL)
-import time
-from pyscf import lib as pyscflib
-from pyscf.pbc.df import ft_ao
-import scipy
 from pyscf.pbc.df.fft_ao2mo import _format_kpts, _iskconserv
 
-rank = rccsd.rank
-comm = rccsd.comm
-size = rccsd.size
-tensor = lib.tensor
-Logger = rccsd.Logger
-static_partition = rccsd.static_partition
+from cc_sym import mpi_helper
+
+import scipy
+
+rank = mpi_helper.rank
+comm = mpi_helper.comm
+size = mpi_helper.size
 
 def get_member(kpti, kptj, kptij_lst):
     kptij = np.vstack((kpti,kptj))
@@ -44,14 +46,13 @@ def ao2mo(mydf, mo_coeffs, kpts):
         mydf.j3c.read([])
     """
     if mydf.j3c is None: mydf.build()
-    log = Logger(mydf.stdout, mydf.verbose)
     cell = mydf.cell
     kptijkl = _format_kpts(kpts)
     kpti, kptj, kptk, kptl = kptijkl
     if isinstance(mo_coeffs, np.ndarray) and mo_coeffs.ndim == 2:
         mo_coeffs = (mo_coeffs,) * 4
     if not _iskconserv(cell, kptijkl):
-        log.warn('df_ao2mo: momentum conservation not found in '
+        logger.warn(mydf, 'df_ao2mo: momentum conservation not found in '
                         'the given k-points %s', kptijkl)
         return np.zeros([mo.shape[1] for mo in mo_coeffs])
 
@@ -91,12 +92,11 @@ def get_eri(mydf, kpts=None):
         mydf.j3c.read([])
     """
     if mydf.j3c is None: mydf.build()
-    log = Logger(mydf.stdout, mydf.verbose)
     cell = mydf.cell
     kptijkl = _format_kpts(kpts)
     kpti, kptj, kptk, kptl = kptijkl
     if not _iskconserv(cell, kptijkl):
-        log.warn('df_ao2mo: momentum conservation not found in '
+        logger.warn(mydf, 'df_ao2mo: momentum conservation not found in '
                         'the given k-points %s', kptijkl)
         return np.zeros([mo.shape[1] for mo in mo_coeffs])
 
@@ -197,10 +197,9 @@ def dump_to_file(mydf, cderi_file=None):
 def _make_j3c(mydf, cell, auxcell, kptij_lst):
     max_memory = max(2000, mydf.max_memory-pyscflib.current_memory()[0])
     fused_cell, fuse = df.df.fuse_auxcell(mydf, auxcell)
-    log = Logger(mydf.stdout, mydf.verbose)
     nao, nfao = cell.nao_nr(), fused_cell.nao_nr()
     jobs = np.arange(fused_cell.nbas)
-    tasks = list(static_partition(jobs))
+    tasks = list(mpi_helper.static_partition(jobs))
     ntasks = max(comm.allgather(len(tasks)))
     j3c_junk = ctf.zeros([len(kptij_lst), nao**2, nfao], dtype=np.complex128)
     t1 =  t0 = (time.clock(), time.time())
@@ -219,7 +218,7 @@ def _make_j3c(mydf, cell, auxcell, kptij_lst):
     else:
         j3c_junk.write([],[])
 
-    t1 = log.timer('j3c_junk', *t1)
+    t1 = logger.timer(mydf, 'j3c_junk', *t1)
 
     naux = auxcell.nao_nr()
     mesh = mydf.mesh
@@ -235,11 +234,11 @@ def _make_j3c(mydf, cell, auxcell, kptij_lst):
     uniq_kpts, uniq_index, uniq_inverse = unique(kpt_ji)
 
     jobs = np.arange(len(uniq_kpts))
-    tasks = list(static_partition(jobs))
+    tasks = list(mpi_helper.static_partition(jobs))
     ntasks = max(comm.allgather(len(tasks)))
 
     blksize = max(2048, int(max_memory*.5e6/16/fused_cell.nao_nr()))
-    log.debug2('max_memory %s (MB)  blocksize %s', max_memory, blksize)
+    logger.debug2(mydf, 'max_memory %s (MB)  blocksize %s', max_memory, blksize)
     j2c  = ctf.zeros([len(uniq_kpts),naux,naux], dtype=np.complex128)
 
     a = cell.lattice_vectors() / (2*np.pi)
@@ -258,7 +257,7 @@ def _make_j3c(mydf, cell, auxcell, kptij_lst):
             j2ctag = 'CD'
         except scipy.linalg.LinAlgError as e:
             w, v = scipy.linalg.eigh(j2c_kptij)
-            log.debug('cond = %.4g, drop %d bfns',
+            logger.debug(mydf, 'cond = %.4g, drop %d bfns',
                       w[-1]/w[0], np.count_nonzero(w<mydf.linear_dep_threshold))
             v1 = np.zeros(v.T.shape, dtype=v.dtype)
             v1[w>mydf.linear_dep_threshold,:] = v[:,w>mydf.linear_dep_threshold].conj().T
@@ -297,11 +296,11 @@ def _make_j3c(mydf, cell, auxcell, kptij_lst):
         j2ctmp = tmp = None
 
     coulG = None
-    t1 = log.timer('j2c', *t1)
+    t1 = logger.timer(mydf, 'j2c', *t1)
 
     j3c = ctf.zeros([len(kpt_ji),nao,nao,naux], dtype=np.complex128)
     jobs = np.arange(len(kpt_ji))
-    tasks = list(static_partition(jobs))
+    tasks = list(mpi_helper.static_partition(jobs))
     ntasks = max(comm.allgather(len(tasks)))
 
     for itask in range(ntasks):
@@ -359,26 +358,7 @@ class GDF(df.GDF):
         self.kptij_lst = None
         df.GDF.__init__(self, cell, kpts)
 
-    def dump_flags(self, verbose=None):
-        log = Logger(self.stdout, self.verbose)
-        log.info('\n')
-        log.info('******** %s ********', self.__class__)
-        log.info('mesh = %s (%d PWs)', self.mesh, np.prod(self.mesh))
-        if self.auxcell is None:
-            log.info('auxbasis = %s', self.auxbasis)
-        else:
-            log.info('auxbasis = %s', self.auxcell.basis)
-        log.info('eta = %s', self.eta)
-        log.info('exp_to_discard = %s', self.exp_to_discard)
-        log.info('len(kpts) = %d', len(self.kpts))
-        log.debug1('    kpts = %s', self.kpts)
-        if self.kpts_band is not None:
-            log.info('len(kpts_band) = %d', len(self.kpts_band))
-            log.debug1('    kpts_band = %s', self.kpts_band)
-        return self
-
     def build(self, j_only=None, with_j3c=True, kpts_band=None):
-        log = Logger(self.stdout, self.verbose)
         if self.kpts_band is not None:
             self.kpts_band = np.reshape(self.kpts_band, (-1,3))
         if kpts_band is not None:
@@ -413,7 +393,7 @@ class GDF(df.GDF):
 
         t1 = (time.clock(), time.time())
         self._make_j3c(self.cell, self.auxcell, kptij_lst)
-        t1 = log.timer('j3c', *t1)
+        t1 = logger.timer(self, 'j3c', *t1)
         return self
 
     dump_to_file = dump_to_file

@@ -1,42 +1,44 @@
 #!/usr/bin/env python
-
+#
+# Author: Yang Gao <younggao1994@gmail.com>
+#
 
 '''
 Mole GCCSD with CTF
 '''
 
+import time
 import numpy as np
 import ctf
-import time
-from pyscf.cc import ccsd
-import cc_sym.gintermediates as imd
-from symtensor import sym_ctf as sym
-from cc_sym import gccsd_numpy
-from cc_sym import rccsd
-from cc_sym import settings
 
-comm = settings.comm
-rank = settings.rank
-Logger = settings.Logger
-static_partition = settings.static_partition
+from pyscf import lib as pyscflib
+from pyscf import ao2mo, gto
+from pyscf.lib import logger
+from pyscf.ao2mo import _ao2mo
+
+from cc_sym import mpi_helper
+from cc_sym import gccsd_numpy, rccsd
+
+from symtensor import sym_ctf as sym
+
+comm = mpi_helper.comm
+rank = mpi_helper.rank
+size = mpi_helper.size
 tensor = sym.tensor
 zeros = sym.zeros
 
 class GCCSD(gccsd_numpy.GCCSD):
-
     def __init__(self, mf, frozen=0, mo_coeff=None, mo_occ=None, SYMVERBOSE=0):
-        ccsd.CCSD.__init__(self, mf, frozen, mo_coeff, mo_occ)
-        self.symlib = None
+        gccsd_numpy.GCCSD.__init__(self, mf, frozen, mo_coeff, mo_occ, SYMVERBOSE)
         self.lib  = sym
-        self.SYMVERBOSE = SYMVERBOSE
 
     @property
     def _backend(self):
         return 'ctf'
 
-    amplitudes_to_vector = rccsd.RCCSD.amplitudes_to_vector
-    vector_to_amplitudes = rccsd.RCCSD.vector_to_amplitudes
-    dump_flags = rccsd.RCCSD.dump_flags
+    def amplitudes_to_vector(self, t1, t2):
+        vector = ctf.hstack((t1.array.ravel(), t2.array.ravel()))
+        return vector
 
     def ao2mo(self, mo_coeff=None):
         if getattr(self._scf, 'with_df', None):
@@ -47,11 +49,12 @@ class GCCSD(gccsd_numpy.GCCSD):
 class _PhysicistsERIs:
     '''<pq||rs> = <pq|rs> - <pq|sr>'''
     def __init__(self, mycc, mo_coeff=None):
-        log = Logger(mycc.stdout, mycc.verbose)
         cput1 = cput0 = (time.clock(), time.time())
         gccsd_numpy._eris_common_init(self, mycc, mo_coeff)
         mo_coeff = self.mo_coeff = comm.bcast(self.mo_coeff, root=0)
-        gccsd_numpy._eris_1e_init(self, mycc, mo_coeff)
+        if rank==0:
+            gccsd_numpy._eris_1e_init(self, mycc, mo_coeff)
+        comm.barrier()
         fock = self.fock = comm.bcast(self.fock, root=0)
         self.e_hf = comm.bcast(self.e_hf, root=0)
 
@@ -79,7 +82,7 @@ class _PhysicistsERIs:
 
         self._foo = self.foo.diagonal(preserve_shape=True)
         self._fvv = self.fvv.diagonal(preserve_shape=True)
-        cput1 = log.timer("Writing Fock", *cput1)
+        cput1 = logger.timer(mycc, "Writing Fock", *cput1)
         eijab = self.eia.array.reshape(nocc,1,nvir,1) + self.eia.array.reshape(1,nocc,1,nvir)
         self.eijab = tensor(eijab, verbose=mycc.SYMVERBOSE)
 
@@ -93,8 +96,8 @@ class _PhysicistsERIs:
             eri_size = eri.size
             nij = sum(sym_forbid_ij)
             nkl = sum(sym_forbid_kl)
-            task_ij = static_partition(np.arange(nij))
-            task_kl = static_partition(np.arange(nkl))
+            task_ij = mpi_helper.static_partition(np.arange(nij))
+            task_kl = mpi_helper.static_partition(np.arange(nkl))
 
             assert(eri_size==sym_forbid_ij.size*sym_forbid_kl.size)
             off_ij = np.arange(sym_forbid_ij.size)[sym_forbid_ij] * sym_forbid_kl.size
@@ -117,7 +120,7 @@ class _PhysicistsERIs:
         vosym_forbid = (virspin[:,None] != occspin).ravel()
         vvsym_forbid = (virspin[:,None] != virspin).ravel()
 
-        cput1 = log.timer('making ao integrals', *cput1)
+        cput1 = logger.timer(mycc, 'making ao integrals', *cput1)
         mo = ctf.astensor(mo_a+mo_b)
         orbo, orbv = mo[:,:nocc], mo[:,nocc:]
 
@@ -165,7 +168,7 @@ class _PhysicistsERIs:
         self.ovvo = tensor(ovvo)
         self.ovvv = tensor(ovvv)
         self.vvvv = tensor(vvvv)
-        log.timer('ao2mo transformation', *cput0)
+        logger.timer(mycc, 'ao2mo transformation', *cput0)
 
 if __name__ == '__main__':
 
@@ -175,7 +178,7 @@ if __name__ == '__main__':
                 ['O', (1.21, 0., 0.)]]
     mol.basis = 'cc-pvdz'
     mol.spin = 2
-    #mol.verbose=4
+    mol.verbose=4
     mol.build()
 
     mf = scf.UHF(mol)

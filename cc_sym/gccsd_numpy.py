@@ -13,21 +13,21 @@ from pyscf import ao2mo
 from pyscf.cc import ccsd
 import cc_sym.gintermediates as imd
 from symtensor import sym
-from pyscf.lib.logger import Logger
+from pyscf.lib import logger
 from cc_sym import rccsd_numpy as rccsd
 
 tensor = sym.tensor
 
-def energy(cc, t1, t2, eris):
-    einsum = cc.lib.einsum
+def energy(mycc, t1, t2, eris):
+    einsum = mycc.lib.einsum
     e = einsum('ia,ia', eris.fov, t1)
     e += 0.25*einsum('ijab,ijab', t2, eris.oovv)
     tmp = einsum('ia,ijab->jb', t1, eris.oovv)
     e += 0.5*einsum('jb,jb->', t1, tmp)
     return e
 
-def update_amps(cc, t1, t2, eris):
-    einsum = cc.lib.einsum
+def update_amps(mycc, t1, t2, eris):
+    einsum = mycc.lib.einsum
 
     fov = eris.fov
     tau = imd.make_tau(t2, t1, t1, eris)
@@ -81,12 +81,6 @@ def update_amps(cc, t1, t2, eris):
 
 class GCCSD(rccsd.RCCSD):
 
-    def __init__(self, mf, frozen=0, mo_coeff=None, mo_occ=None, SYMVERBOSE=0):
-        ccsd.CCSD.__init__(self, mf, frozen, mo_coeff, mo_occ)
-        self.symlib = None
-        self.lib  = sym
-        self.SYMVERBOSE = SYMVERBOSE
-
     energy = energy
     update_amps = update_amps
 
@@ -94,11 +88,10 @@ class GCCSD(rccsd.RCCSD):
         if eris is None:
             eris = self.ao2mo(self.mo_coeff)
         einsum = self.lib.einsum
-        log = Logger(self.stdout, self.verbose)
         t1 = eris.fov / eris.eia
         t2 = eris.oovv / eris.eijab
         self.emp2 = 0.25*einsum('ijab,ijab', t2, eris.oovv.conj()).real
-        log.info('Init t2, MP2 energy = %.15g', self.emp2)
+        logger.info(self, 'Init t2, MP2 energy = %.15g', self.emp2)
         return self.emp2, t1, t2
 
     def ao2mo(self, mo_coeff=None):
@@ -106,12 +99,6 @@ class GCCSD(rccsd.RCCSD):
             raise NotImplementedError
         else:
             return _PhysicistsERIs(self, mo_coeff)
-
-    def kernel(self, t1=None, t2=None, eris=None):
-        return self.ccsd(t1, t2, eris)
-
-    def ccsd(self, t1=None, t2=None, eris=None):
-        return rccsd.RCCSD.ccsd(self, t1, t2, eris)
 
 
 def _eris_common_init(eris, mycc, mo_coeff):
@@ -135,7 +122,6 @@ def _eris_common_init(eris, mycc, mo_coeff):
     eris.mo_coeff = mo_coeff
 
 def _eris_1e_init(eris, mycc, mo_coeff):
-    log = Logger(mycc.stdout, mycc.verbose)
     dm = mycc._scf.make_rdm1(mycc.mo_coeff, mycc.mo_occ)
     vhf = mycc._scf.get_veff(mycc.mol, dm)
     fockao = mycc._scf.get_fock(vhf=vhf, dm=dm)
@@ -145,15 +131,13 @@ def _eris_1e_init(eris, mycc, mo_coeff):
     mo_e = eris.mo_energy = fock.diagonal().real
     gap = abs(mo_e[:nocc,None] - mo_e[None,nocc:]).min()
     if gap < 1e-5:
-        log.warn('HOMO-LUMO gap %s too small for GCCSD', gap)
+        logger.warn(mycc, 'HOMO-LUMO gap %s too small for GCCSD', gap)
     eris.e_hf = mycc._scf.energy_tot(dm=dm, vhf=vhf)
 
 class _PhysicistsERIs:
     '''<pq||rs> = <pq|rs> - <pq|sr>'''
     def __init__(self, mycc, mo_coeff=None):
         _eris_common_init(self, mycc, mo_coeff)
-        log = Logger(mycc.stdout, mycc.verbose)
-
         mo_coeff = self.mo_coeff
         _eris_1e_init(self, mycc, mo_coeff)
         nocc = self.nocc
@@ -214,12 +198,14 @@ if __name__ == '__main__':
                 ['O', (1.21, 0., 0.)]]
     mol.basis = 'cc-pvdz'
     mol.spin = 2
+    mol.verbose=5
     mol.build()
     mf = scf.UHF(mol).run()
     mf = scf.addons.convert_to_ghf(mf)
 
     # Freeze 1s electrons
     frozen = [0,1,2,3]
+    frozen = None
     gcc = GCCSD(mf, frozen=frozen)
     ecc, t1, t2 = gcc.kernel()
 

@@ -3,21 +3,20 @@
 # Author: Yang Gao <younggao1994@gmail.com>
 #
 
-from cc_sym import eom_rccsd, rccsd
+from cc_sym import eom_kccsd_rhf_numpy
 import numpy as np
 import time
 from pyscf.pbc.mp.kmp2 import padding_k_idx
+from pyscf.lib import logger
 import ctf
-import symtensor.sym_ctf as lib
-from cc_sym import settings
-comm = settings.comm
-rank = settings.rank
-size = settings.size
-Logger = settings.Logger
-static_partition = settings.static_partition
+import symtensor.sym_ctf as sym
+from cc_sym import mpi_helper
 
-tensor = lib.tensor
-zeros = lib.zeros
+comm = mpi_helper.comm
+rank = mpi_helper.rank
+
+tensor = sym.tensor
+zeros = sym.zeros
 
 def kernel(eom, nroots=1, koopmans=True, guess=None, left=False,
            eris=None, imds=None, partition=None, kptlist=None,
@@ -26,7 +25,6 @@ def kernel(eom, nroots=1, koopmans=True, guess=None, left=False,
     cput0 = (time.clock(), time.time())
     eom.dump_flags()
 
-    log = Logger(eom.stdout, eom.verbose)
     if imds is None:
         imds = eom.make_imds(eris)
 
@@ -66,8 +64,8 @@ def kernel(eom, nroots=1, koopmans=True, guess=None, left=False,
         for n, en, vn in zip(range(nroots), evals_k, evecs_k):
             r1, r2 = eom.vector_to_amplitudes(vn, kshift)
             qp_weight = r1.norm()**2
-            log.info('EOM-CCSD root %d E = %.16g  qpwt = %0.6g', n, en, qp_weight)
-    log.timer('EOM-CCSD', *cput0)
+            logger.info(eom, 'EOM-CCSD root %d E = %.16g  qpwt = %0.6g', n, en, qp_weight)
+    logger.timer(eom, 'EOM-CCSD', *cput0)
     evecs = ctf.vstack(tuple(evecs))
     return convs, evals, evecs
 
@@ -81,8 +79,8 @@ def vector_to_amplitudes_ip(eom, vector, kshift):
     sym2 = ['++-', [kpts,]*3, kpts[kshift], gvec]
     r1 = vector[:nocc].copy()
     r2 = vector[nocc:].copy().reshape(nkpts,nkpts,nocc,nocc,nvir)
-    r1 = tensor(r1, sym1, symlib=eom.symlib)
-    r2 = tensor(r2, sym2, symlib=eom.symlib)
+    r1 = tensor(r1, sym1, symlib=eom.symlib, verbose=eom.SYMVERBOSE)
+    r2 = tensor(r2, sym2, symlib=eom.symlib, verbose=eom.SYMVERBOSE)
     return [r1,r2]
 
 def vector_to_amplitudes_ea(eom, vector, kshift):
@@ -93,9 +91,13 @@ def vector_to_amplitudes_ea(eom, vector, kshift):
     sym2 = ['-++', [kpts,]*3, kpts[kshift], gvec]
     r1 = vector[:nvir].copy()
     r2 = vector[nvir:].copy().reshape(nkpts,nkpts,nocc,nvir,nvir)
-    r1 = tensor(r1,sym1, symlib=eom.symlib)
-    r2 = tensor(r2,sym2, symlib=eom.symlib)
+    r1 = tensor(r1,sym1, symlib=eom.symlib, verbose=eom.SYMVERBOSE)
+    r2 = tensor(r2,sym2, symlib=eom.symlib, verbose=eom.SYMVERBOSE)
     return [r1,r2]
+
+def amplitudes_to_vector(eom, r1, r2):
+    vector = ctf.hstack((r1.array.ravel(), r2.array.ravel()))
+    return vector
 
 def ipccsd_diag(eom, kshift, imds=None):
     if imds is None: imds = eom.make_imds()
@@ -108,10 +110,10 @@ def ipccsd_diag(eom, kshift, imds=None):
     Hr1array = -imds.Loo.diagonal()[kshift]
     sym1 = ['+', [kpts,], kpts[kshift], gvec]
     sym2 = ['++-', [kpts,]*3, kpts[kshift], gvec]
-    Hr1 = tensor(Hr1array, sym1, symlib=eom.symlib)
-    Hr2 = zeros([nocc,nocc,nvir], dtype, sym2, symlib=eom.symlib)
+    Hr1 = tensor(Hr1array, sym1, symlib=eom.symlib, verbose=eom.SYMVERBOSE)
+    Hr2 = zeros([nocc,nocc,nvir], dtype, sym2, symlib=eom.symlib, verbose=eom.SYMVERBOSE)
 
-    tasks = static_partition(range(nkpts**2))
+    tasks = mpi_helper.static_partition(range(nkpts**2))
     ntasks = max(comm.allgather(len(tasks)))
 
     idx_ijb = np.arange(nocc*nocc*nvir)
@@ -164,88 +166,6 @@ def ipccsd_diag(eom, kshift, imds=None):
         Hr2 += ctf.einsum('IJijcb,IJijcb->IJijb', t2[:,:,kshift], Woovvtmp)
     return eom.amplitudes_to_vector(Hr1, Hr2)
 
-def ipccsd_matvec(eom, vector, kshift, imds=None, diag=None):
-    # Ref: Nooijen and Snijders, J. Chem. Phys. 102, 1681 (1995) Eqs.(8)-(9)
-    if imds is None: imds = eom.make_imds()
-    r1,r2 = eom.vector_to_amplitudes(vector, kshift)
-
-    # 1h-1h block
-    Hr1 = -lib.einsum('ki,k->i',imds.Loo,r1)
-    #1h-2h1p block
-    Hr1 += 2*lib.einsum('ld,ild->i',imds.Fov,r2)
-    Hr1 +=  -lib.einsum('kd,kid->i',imds.Fov,r2)
-    Hr1 += -2*lib.einsum('klid,kld->i',imds.Wooov,r2)
-    Hr1 +=    lib.einsum('lkid,kld->i',imds.Wooov,r2)
-
-    # 2h1p-1h block
-    Hr2 = -lib.einsum('kbij,k->ijb',imds.Wovoo,r1)
-    # 2h1p-2h1p block
-    if eom.partition == 'mp':
-        foo = self.eris.foo
-        fvv = self.eris.fvv
-        Hr2 += lib.einsum('bd,ijd->ijb',fvv,r2)
-        Hr2 += -lib.einsum('ki,kjb->ijb',foo,r2)
-        Hr2 += -lib.einsum('lj,ilb->ijb',foo,r2)
-    elif eom.partition == 'full':
-        Hr2 += self._ipccsd_diag_matrix2*r2
-    else:
-        Hr2 += lib.einsum('bd,ijd->ijb',imds.Lvv,r2)
-        Hr2 += -lib.einsum('ki,kjb->ijb',imds.Loo,r2)
-        Hr2 += -lib.einsum('lj,ilb->ijb',imds.Loo,r2)
-        Hr2 +=  lib.einsum('klij,klb->ijb',imds.Woooo,r2)
-        Hr2 += 2*lib.einsum('lbdj,ild->ijb',imds.Wovvo,r2)
-        Hr2 +=  -lib.einsum('kbdj,kid->ijb',imds.Wovvo,r2)
-        Hr2 +=  -lib.einsum('lbjd,ild->ijb',imds.Wovov,r2) #typo in Ref
-        Hr2 +=  -lib.einsum('kbid,kjd->ijb',imds.Wovov,r2)
-        tmp = 2*lib.einsum('lkdc,kld->c',imds.Woovv,r2)
-        tmp += -lib.einsum('kldc,kld->c',imds.Woovv,r2)
-        Hr2 += -lib.einsum('c,ijcb->ijb',tmp,imds.t2)
-
-    vector = eom.amplitudes_to_vector(Hr1,Hr2)
-    return vector
-
-def eaccsd_matvec(eom, vector, kshift, imds=None, diag=None):
-    # Ref: Nooijen and Bartlett, J. Chem. Phys. 102, 3629 (1994) Eqs.(30)-(31)
-    if imds is None: imds = eom.make_imds()
-    r1,r2 = eom.vector_to_amplitudes(vector, kshift)
-
-    # Eq. (30)
-    # 1p-1p block
-    Hr1 =  lib.einsum('ac,c->a',imds.Lvv,r1)
-    # 1p-2p1h block
-    Hr1 += lib.einsum('ld,lad->a',2.*imds.Fov,r2)
-    Hr1 += lib.einsum('ld,lda->a',  -imds.Fov,r2)
-    Hr1 += 2*lib.einsum('alcd,lcd->a',imds.Wvovv,r2)
-    Hr1 +=  -lib.einsum('aldc,lcd->a',imds.Wvovv,r2)
-    # Eq. (31)
-    # 2p1h-1p block
-    Hr2 = lib.einsum('abcj,c->jab',imds.Wvvvo,r1)
-    # 2p1h-2p1h block
-    if eom.partition == 'mp':
-        foo = imds.eris.foo
-        fvv = imds.eris.fvv
-        Hr2 +=  lib.einsum('ac,jcb->jab',fvv,r2)
-        Hr2 +=  lib.einsum('bd,jad->jab',fvv,r2)
-        Hr2 += -lib.einsum('lj,lab->jab',foo,r2)
-    elif eom.partition == 'full':
-        Hr2 += eom._eaccsd_diag_matrix2*r2
-    else:
-        Hr2 +=  lib.einsum('ac,jcb->jab',imds.Lvv,r2)
-        Hr2 +=  lib.einsum('bd,jad->jab',imds.Lvv,r2)
-        Hr2 += -lib.einsum('lj,lab->jab',imds.Loo,r2)
-        Hr2 += 2*lib.einsum('lbdj,lad->jab',imds.Wovvo,r2)
-        Hr2 +=  -lib.einsum('lbjd,lad->jab',imds.Wovov,r2)
-        Hr2 +=  -lib.einsum('lajc,lcb->jab',imds.Wovov,r2)
-        Hr2 +=  -lib.einsum('lbcj,lca->jab',imds.Wovvo,r2)
-
-        Hr2 +=   lib.einsum('abcd,jcd->jab',imds.Wvvvv,r2)
-        tmp = (2*lib.einsum('klcd,lcd->k',imds.Woovv,r2)
-                -lib.einsum('kldc,lcd->k',imds.Woovv,r2))
-        Hr2 += -lib.einsum('k,kjab->jab',tmp,imds.t2)
-
-    vector = eom.amplitudes_to_vector(Hr1,Hr2)
-    return vector
-
 def eaccsd_diag(eom, kshift, imds=None, diag=None):
     # Ref: Nooijen and Bartlett, J. Chem. Phys. 102, 3629 (1994) Eqs.(30)-(31)
     if imds is None: imds = eom.make_imds()
@@ -262,7 +182,7 @@ def eaccsd_diag(eom, kshift, imds=None, diag=None):
     Hr1 = tensor(Hr1array, sym1, symlib=eom.symlib)
     Hr2 = zeros([nocc,nvir,nvir], dtype, sym2, symlib=eom.symlib)
 
-    tasks = static_partition(range(nkpts**2))
+    tasks = mpi_helper.static_partition(range(nkpts**2))
     ntasks = max(comm.allgather(len(tasks)))
     idx_jab = np.arange(nocc*nvir*nvir)
     if eom.partition == 'mp':
@@ -315,51 +235,13 @@ def eaccsd_diag(eom, kshift, imds=None, diag=None):
 
     return eom.amplitudes_to_vector(Hr1, Hr2)
 
-class EOMIP(eom_rccsd.EOMIP):
-    def __init__(self, cc):
-        eom_rccsd.EOMIP.__init__(self,cc)
-        self.kpts = cc.kpts
-        self.lib = cc.lib
-        self.symlib = cc.symlib
-        self._backend = cc._backend
-        self.t1, self.t2 = cc.t1, cc.t2
-        self.nonzero_opadding, self.nonzero_vpadding = self.get_padding_k_idx(cc)
-        self.kconserv = cc.khelper.kconserv
+class EOMIP(eom_kccsd_rhf_numpy.EOMIP):
 
-    matvec = ipccsd_matvec
     vector_to_amplitudes = vector_to_amplitudes_ip
+    amplitudes_to_vector = amplitudes_to_vector
     get_diag = ipccsd_diag
     kernel = kernel
     ipccsd = kernel
-
-    def get_padding_k_idx(self, cc):
-        return padding_k_idx(cc, kind='split')
-
-    def vector_size(self):
-        nocc = self.nocc
-        nvir = self.nmo - nocc
-        nkpts = self.nkpts
-        return nocc + nkpts**2*nocc*nocc*nvir
-
-    @property
-    def nkpts(self):
-        return len(self.kpts)
-
-    def update_symlib(self,kshift):
-        kpts, gvec = self.kpts, self._cc._scf.cell.reciprocal_vectors()
-        sym1 = ['+', [kpts,], kpts[kshift], gvec]
-        sym2 = ['++-', [kpts,]*3, kpts[kshift], gvec]
-        self.symlib.update(sym1,sym2)
-
-    def gen_matvec(self, kshift, imds=None, left=False, **kwargs):
-        if imds is None: imds = self.make_imds()
-        diag = self.get_diag(kshift, imds)
-        if left:
-            raise NotImplementedError
-            matvec = lambda xs: [self.l_matvec(x, kshift, imds, diag) for x in xs]
-        else:
-            matvec = lambda x: self.matvec(x, kshift, imds, diag)
-        return matvec, diag
 
 
     def get_init_guess(self, kshift, nroots=1, koopmans=False, diag=None):
@@ -381,41 +263,13 @@ class EOMIP(eom_rccsd.EOMIP):
             guess.write([], [])
         return guess
 
-class EOMEA(eom_rccsd.EOMEA):
-    def __init__(self, cc):
-        eom_rccsd.EOMEA.__init__(self,cc)
-        self.kpts = cc.kpts
-        self.lib = cc.lib
-        self.symlib = cc.symlib
-        self._backend = cc._backend
-        self.t1, self.t2 = cc.t1, cc.t2
-        self.nonzero_opadding, self.nonzero_vpadding = self.get_padding_k_idx(cc)
-        self.kconserv = cc.khelper.kconserv
+class EOMEA(eom_kccsd_rhf_numpy.EOMEA):
 
-    matvec = eaccsd_matvec
     vector_to_amplitudes = vector_to_amplitudes_ea
+    amplitudes_to_vector = amplitudes_to_vector
     get_diag = eaccsd_diag
     eaccsd = kernel
     kernel = kernel
-
-    def get_padding_k_idx(self, cc):
-        return padding_k_idx(cc, kind='split')
-
-    @property
-    def nkpts(self):
-        return len(self.kpts)
-
-    def vector_size(self):
-        nocc = self.nocc
-        nvir = self.nmo - nocc
-        nkpts = self.nkpts
-        return nvir + nkpts**2*nocc*nvir*nvir
-
-    def update_symlib(self,kshift):
-        kpts, gvec = self.kpts, self._cc._scf.cell.reciprocal_vectors()
-        sym1 = ['+', [kpts,], kpts[kshift], gvec]
-        sym2 = ['-++', [kpts,]*3, kpts[kshift], gvec]
-        self.symlib.update(sym1,sym2)
 
     def get_init_guess(self, kshift, nroots=1, koopmans=False, diag=None):
         size = self.vector_size()
@@ -433,16 +287,6 @@ class EOMEA(eom_rccsd.EOMEA):
         else:
             guess.write([],[])
         return guess
-
-    def gen_matvec(self, kshift, imds=None, left=False, **kwargs):
-        if imds is None: imds = self.make_imds()
-        diag = self.get_diag(kshift, imds)
-        if left:
-            raise NotImplementedError
-            matvec = lambda xs: [self.l_matvec(x, kshift, imds, diag) for x in xs]
-        else:
-            matvec = lambda x: self.matvec(x, kshift, imds, diag)
-        return matvec, diag
 
 
 if __name__ == '__main__':
@@ -475,7 +319,9 @@ if __name__ == '__main__':
     mycc.kernel()
 
     myeom = EOMIP(mycc)
-    myeom.ipccsd(nroots=2, kptlist=[1], koopmans=True)
-
+    _, eip, _ = myeom.ipccsd(nroots=2, kptlist=[1], koopmans=True)
     myeom = EOMEA(mycc)
-    myeom.eaccsd(nroots=2, kptlist=[1], koopmans=True)
+    _, eea, _ = myeom.eaccsd(nroots=2, kptlist=[1], koopmans=True)
+
+    print(eip[0,1]- -0.5392478826367997)
+    print(eea[0,0]- 1.147581866049977)

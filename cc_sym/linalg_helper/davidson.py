@@ -2,14 +2,15 @@ from functools import reduce
 import time
 import numpy as np
 import scipy.linalg
-from pyscf import lib
+from pyscf.lib import logger
 from symtensor.settings import load_lib
 import sys
 import ctf
-from mpi4py import MPI
-comm = MPI.COMM_WORLD
-rank = comm.Get_rank()
-size = comm.Get_size()
+from cc_sym import mpi_helper
+
+comm = mpi_helper.comm
+rank = mpi_helper.rank
+size = mpi_helper.comm
 
 def eigs(matvec, vecsize, nroots, x0=None, Adiag=None, guess=False, verbose=4):
     '''Davidson diagonalization method to solve A c = E c
@@ -32,11 +33,7 @@ def davidson(mult_by_A, N, neig, x0=None, Adiag=None, verbose=4):
         and returns a vector of length N.
     neig is the number of eigenvalues requested
     """
-
-    if rank==0:
-        log = lib.logger.Logger(sys.stdout, verbose)
-    else:
-        log = lib.logger.Logger(sys.stdout, 0)
+    log = logger.Logger(sys.stdout, verbose)
 
     cput1 = (time.clock(), time.time())
 
@@ -128,7 +125,7 @@ def diagonalize_asymm(H):
 if __name__ == '__main__':
     N = 200
     neig = 2
-    backend = 'numpy'
+    backend = 'ctf'
     func= load_lib(backend)
     A = np.zeros((N,N))
     k = N/2
@@ -145,7 +142,7 @@ if __name__ == '__main__':
     def matvec(x):
         return func.dot(A,x)
 
-    conv, e,c = eigs(matvec,N,neig,backend=backend,Adiag=func.diag(A))
+    conv, e,c = eigs(matvec,N,neig,Adiag=func.diag(A))
     if rank ==0:
         print("# davidson evals =", e)
 

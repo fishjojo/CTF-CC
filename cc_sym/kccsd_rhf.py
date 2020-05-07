@@ -4,105 +4,42 @@
 #
 import time
 import numpy as np
-from pyscf import lib as pyscflib
-from symtensor import sym_ctf as lib
-from symtensor.symlib import SYMLIB
-from pyscf.pbc.lib import kpts_helper
-from pyscf.pbc.mp.kmp2 import (get_frozen_mask, get_nocc, get_nmo,
-                               padded_mo_coeff, padding_k_idx)
-from pyscf.pbc.cc.kccsd_rhf import _get_epq
 import ctf
-from cc_sym import rccsd
-from pyscf.pbc import tools, df
-from functools import reduce
-from cc_sym import settings
-comm = settings.comm
-rank = settings.rank
-size = settings.size
-Logger = settings.Logger
-static_partition = settings.static_partition
 
-tensor = lib.tensor
-zeros = lib.zeros
+from pyscf.lib import logger
+from pyscf.pbc import df
+from pyscf.pbc.mp.kmp2 import padding_k_idx
+from pyscf.pbc.cc.kccsd_rhf import _get_epq
+import pyscf.pbc.tools.pbc as tools
 
+from cc_sym import mpi_helper
+from cc_sym import kccsd_rhf_numpy
 
-def energy(cc, t1, t2, eris):
-    log = Logger(cc.stdout, cc.verbose)
-    nkpts = cc.nkpts
-    e = 2*lib.einsum('ia,ia', eris.fov, t1)
-    tau = lib.einsum('ia,jb->ijab',t1,t1)
-    tau += t2
-    e += 2*lib.einsum('ijab,iajb', tau, eris.ovov)
-    e +=  -lib.einsum('ijab,ibja', tau, eris.ovov)
-    if abs(e.imag)>1e-4:
-        log.warn('Non-zero imaginary part found in KRCCSD energy %s', e)
-    return e.real / nkpts
+from symtensor import sym_ctf as sym
 
-class KRCCSD(rccsd.RCCSD):
+comm = mpi_helper.comm
+rank = mpi_helper.rank
+size = mpi_helper.size
 
-    def __init__(self, mf, frozen=0, mo_coeff=None, mo_occ=None, SYMVERBOSE=0):
-        rccsd.RCCSD.__init__(self, mf, frozen, mo_coeff, mo_occ, SYMVERBOSE)
-        self.kpts = mf.kpts
-        self.khelper = kpts_helper.KptsHelper(mf.cell, mf.kpts)
-        self.max_space = 20
-        self._keys = self._keys.union(['max_space'])
-        self.symlib = SYMLIB('ctf')
-        self.make_symlib()
+tensor = sym.tensor
+zeros = sym.zeros
+einsum = sym.einsum
 
-    energy = energy
-    get_nocc = get_nocc
-    get_nmo = get_nmo
-    get_frozen_mask = get_frozen_mask
+class KRCCSD(kccsd_rhf_numpy.KRCCSD):
+    def __init__(self, mf, frozen=0, mo_coeff=None, mo_occ=None):
+        kccsd_rhf_numpy.KRCCSD.__init__(self, mf, frozen, mo_coeff, mo_occ)
+        self.lib = sym
 
     @property
-    def nkpts(self):
-        return len(self.kpts)
+    def _backend(self):
+        return 'ctf'
+
+    def amplitudes_to_vector(self, t1, t2):
+        vector = ctf.hstack((t1.array.ravel(), t2.array.ravel()))
+        return vector
 
     def ao2mo(self, mo_coeff=None):
         return _ChemistsERIs(self, mo_coeff)
-
-    def init_amps(self, eris):
-        time0 = time.clock(), time.time()
-        log = Logger(self.stdout, self.verbose)
-        nocc = self.nocc
-        nvir = self.nmo - nocc
-        kpts = self.kpts
-        nkpts = self.nkpts
-        gvec = self._scf.cell.reciprocal_vectors()
-        sym1 = ['+-', [kpts,]*2, None, gvec]
-        t1 = lib.zeros([nocc,nvir], eris.dtype, sym1, symlib=self.symlib, verbose=self.SYMVERBOSE)
-        t2 = eris.ovov.transpose(0,2,1,3).conj() / eris.eijab
-        self.emp2  = 2*lib.einsum('ijab,iajb', t2, eris.ovov)
-        self.emp2 -=   lib.einsum('ijab,ibja', t2, eris.ovov)
-        self.emp2 = self.emp2.real/nkpts
-        log.info('Init t2, MP2 energy (with fock eigenvalue shift) = %.15g', self.emp2)
-        log.timer('init mp2', *time0)
-        return self.emp2, t1, t2
-
-    def make_symlib(self):
-        kpts = self.kpts
-        gvec = self._scf.cell.reciprocal_vectors()
-        sym1 = ['+-',[kpts,]*2, None, gvec]
-        sym2 = ['++--',[kpts,]*4, None, gvec]
-        sym3 = ['++-',[kpts,]*3, None, gvec]
-        self.symlib.update(sym1, sym2, sym3)
-
-    def vector_to_amplitudes(self, vec, nmo=None, nocc=None):
-        if nocc is None: nocc = self.nocc
-        if nmo is None: nmo = self.nmo
-        nvir = nmo - nocc
-        nkpts = self.nkpts
-        nov = nkpts * nocc * nvir
-        t1 = vec[:nov].reshape(nkpts,nocc,nvir)
-        t2 = vec[nov:].reshape(nkpts,nkpts,nkpts,nocc,nocc,nvir,nvir)
-
-        kpts = self.kpts
-        gvec = self._scf.cell.reciprocal_vectors()
-        sym1 = ['+-',[kpts,]*2, None, gvec]
-        sym2 = ['++--',[kpts,]*4, None, gvec]
-        t1  = tensor(t1, sym1, symlib=self.symlib, verbose=self.SYMVERBOSE)
-        t2  = tensor(t2, sym2, symlib=self.symlib, verbose=self.SYMVERBOSE)
-        return t1, t2
 
     def ipccsd(self, nroots=1, koopmans=False, guess=None, left=False,
                eris=None, partition=None, kptlist=None):
@@ -124,7 +61,6 @@ def _make_fftdf_eris(mycc, eris):
     mydf = mycc._scf.with_df
     mo_coeff = eris.mo_coeff
     kpts = mycc.kpts
-    logger = Logger(mycc.stdout, mycc.verbose)
     cell = mydf.cell
     gvec = cell.reciprocal_vectors()
     nao = cell.nao_nr()
@@ -149,7 +85,7 @@ def _make_fftdf_eris(mycc, eris):
         for kj in range(ki,nkpts):
             jobs.append([ki,kj])
 
-    tasks = list(static_partition(jobs))
+    tasks = list(mpi_helper.static_partition(jobs))
     ntasks = max(comm.allgather(len(tasks)))
     idx_ooG = np.arange(nocc*nocc*ngrids)
     idx_ovG = np.arange(nocc*nvir*ngrids)
@@ -216,7 +152,7 @@ def _make_fftdf_eris(mycc, eris):
         iaG.write(off*idx_ovG.size+idx_ovG, v[:nocc,nocc:].ravel())
         abG.write(off*idx_vvG.size+idx_vvG, v[nocc:,nocc:].ravel())
 
-    cput1 = logger.timer("Generating ijG", *cput1)
+    cput1 = logger.timer(mycc, "Generating ijG", *cput1)
     sym1 = ["+-+", [kpts,]*3, None, gvec]
     sym2 = ["+--", [kpts,]*3, None, gvec]
 
@@ -229,19 +165,20 @@ def _make_fftdf_eris(mycc, eris):
     voR = tensor(aiR, sym2, verbose=mycc.SYMVERBOSE)
     vvR = tensor(abR, sym2, verbose=mycc.SYMVERBOSE)
 
-    eris.oooo = lib.einsum('ijg,klg->ijkl', ooG, ooR)/ nkpts
-    eris.ooov = lib.einsum('ijg,kag->ijka', ooG, ovR)/ nkpts
-    eris.oovv = lib.einsum('ijg,abg->ijab', ooG, vvR)/ nkpts
+    eris.oooo = einsum('ijg,klg->ijkl', ooG, ooR)/ nkpts
+    eris.ooov = einsum('ijg,kag->ijka', ooG, ovR)/ nkpts
+    eris.oovv = einsum('ijg,abg->ijab', ooG, vvR)/ nkpts
     ooG = ooR = ijG = ijR = None
-    eris.ovvo = lib.einsum('iag,bjg->iabj', ovG, voR)/ nkpts
-    eris.ovov = lib.einsum('iag,jbg->iajb', ovG, ovR)/ nkpts
+    eris.ovvo = einsum('iag,bjg->iabj', ovG, voR)/ nkpts
+    eris.ovov = einsum('iag,jbg->iajb', ovG, ovR)/ nkpts
     ovR = iaR = voR = aiR = None
-    eris.ovvv = lib.einsum('iag,bcg->iabc', ovG, vvR)/ nkpts
+    eris.ovvv = einsum('iag,bcg->iabc', ovG, vvR)/ nkpts
     ovG = iaG = None
-    eris.vvvv = lib.einsum('abg,cdg->abcd', vvG, vvR)/ nkpts
-    cput1 = logger.timer("ijG to eri", *cput1)
+    eris.vvvv = einsum('abg,cdg->abcd', vvG, vvR)/ nkpts
+    cput1 = logger.timer(mycc, "ijG to eri", *cput1)
 
 def _make_df_eris(mycc, eris):
+    lib = mycc.lib
     from cc_sym import mpigdf
     mydf = mycc._scf.with_df
     mo_coeff = eris.mo_coeff
@@ -260,13 +197,12 @@ def _make_df_eris(mycc, eris):
     for ki in range(nkpts):
         for kj in range(ki,nkpts):
             jobs.append([ki,kj])
-    tasks = static_partition(jobs)
+    tasks = mpi_helper.static_partition(jobs)
     ntasks = max(comm.allgather((len(tasks))))
     idx_j3c = np.arange(nao**2*naux)
     idx_ooL = np.arange(nocc**2*naux)
     idx_ovL = np.arange(nocc*nvir*naux)
     idx_vvL = np.arange(nvir**2*naux)
-    log = Logger(mydf.stdout, mydf.verbose)
     cput1 = cput0 = (time.clock(), time.time())
     for itask in range(ntasks):
         if itask >= len(tasks):
@@ -302,7 +238,7 @@ def _make_df_eris(mycc, eris):
         aiL.write(off*idx_ovL.size+idx_ovL, pqL[nocc:,:nocc].ravel())
         abL.write(off*idx_vvL.size+idx_vvL, pqL[nocc:,nocc:].ravel())
 
-    cput1 = log.timer("j3c transformation", *cput1)
+    cput1 = logger.timer(mycc, "j3c transformation", *cput1)
     sym1 = ["+-+", [kpts,]*3, None, gvec]
     sym2 = ["+--", [kpts,]*3, None, gvec]
 
@@ -316,69 +252,62 @@ def _make_df_eris(mycc, eris):
     voL2 = tensor(aiL, sym2, verbose=mycc.SYMVERBOSE)
     vvL2 = tensor(abL, sym2, verbose=mycc.SYMVERBOSE)
 
-    eris.oooo = lib.einsum('ijg,klg->ijkl', ooL, ooL2) / nkpts
-    eris.ooov = lib.einsum('ijg,kag->ijka', ooL, ovL2) / nkpts
-    eris.oovv = lib.einsum('ijg,abg->ijab', ooL, vvL2) / nkpts
-    eris.ovvo = lib.einsum('iag,bjg->iabj', ovL, voL2) / nkpts
-    eris.ovov = lib.einsum('iag,jbg->iajb', ovL, ovL2) / nkpts
-    eris.ovvv = lib.einsum('iag,bcg->iabc', ovL, vvL2) / nkpts
-    eris.vvvv = lib.einsum('abg,cdg->abcd', vvL, vvL2) / nkpts
+    eris.oooo = einsum('ijg,klg->ijkl', ooL, ooL2) / nkpts
+    eris.ooov = einsum('ijg,kag->ijka', ooL, ovL2) / nkpts
+    eris.oovv = einsum('ijg,abg->ijab', ooL, vvL2) / nkpts
+    eris.ovvo = einsum('iag,bjg->iabj', ovL, voL2) / nkpts
+    eris.ovov = einsum('iag,jbg->iajb', ovL, ovL2) / nkpts
+    eris.ovvv = einsum('iag,bcg->iabc', ovL, vvL2) / nkpts
+    eris.vvvv = einsum('abg,cdg->abcd', vvL, vvL2) / nkpts
 
-    cput1 = log.timer("integral transformation", *cput1)
+    cput1 = logger.timer(mycc, "integral transformation", *cput1)
 
 class _ChemistsERIs:
-    def __init__(self, cc, mo_coeff=None):
+    def __init__(self, mycc, mo_coeff=None):
         from pyscf.pbc.cc.ccsd import _adjust_occ
-        import pyscf.pbc.tools.pbc as tools
-        if mo_coeff is None:
-            mo_coeff = cc.mo_coeff
-        cput0 = (time.clock(), time.time())
-        symlib = cc.symlib
-        log = Logger(cc.stdout, cc.verbose)
-        self.lib = lib
-        nocc, nmo, nkpts = cc.nocc, cc.nmo, cc.nkpts
-        nvir = nmo - nocc
-        cell, kpts = cc._scf.cell, cc.kpts
-        gvec = cell.reciprocal_vectors()
-        sym1 = ['+-', [kpts,]*2, None, gvec]
-        sym2 = ['+-+-', [kpts,]*4, None, gvec]
-        mo_coeff = self.mo_coeff = padded_mo_coeff(cc, mo_coeff)
-        nonzero_opadding, nonzero_vpadding = padding_k_idx(cc, kind="split")
-        madelung = tools.madelung(cell, kpts)
-        fock = None
-        if rank==0:
-            dm = cc._scf.make_rdm1(cc.mo_coeff, cc.mo_occ)
-            with pyscflib.temporary_env(cc._scf, exxdiv=None):
-                fockao = cc._scf.get_hcore() + cc._scf.get_veff(cell, dm)
-            fock = np.asarray([reduce(np.dot, (mo.T.conj(), fockao[k], mo))
-                                for k, mo in enumerate(mo_coeff)])
-        fock = comm.bcast(fock, root=0)
-        self.dtype = dtype = np.result_type(*(mo_coeff, fock)).char
-        self.foo = zeros([nocc,nocc], dtype, sym1, symlib=symlib, verbose=cc.SYMVERBOSE)
-        self.fov = zeros([nocc,nvir], dtype, sym1, symlib=symlib, verbose=cc.SYMVERBOSE)
-        self.fvv = zeros([nvir,nvir], dtype, sym1, symlib=symlib, verbose=cc.SYMVERBOSE)
-        self.eia = zeros([nocc,nvir], np.float64, sym1, symlib=symlib, verbose=cc.SYMVERBOSE)
-        self._foo = zeros([nocc,nocc], dtype, sym1, symlib=symlib, verbose=cc.SYMVERBOSE)
-        self._fvv = zeros([nvir,nvir], dtype, sym1, symlib=symlib, verbose=cc.SYMVERBOSE)
 
-        foo = fock[:,:nocc,:nocc]
-        fov = fock[:,:nocc,nocc:]
-        fvv = fock[:,nocc:,nocc:]
+        cput0 = (time.clock(), time.time())
+
+        nocc, nmo, nkpts = mycc.nocc, mycc.nmo, mycc.nkpts
+        nvir = nmo - nocc
+        cell, kpts = mycc._scf.cell, mycc.kpts
+        symlib = mycc.symlib
+        gvec = cell.reciprocal_vectors()
+        sym2 = ['+-+-', [kpts,]*4, None, gvec]
+
+        nonzero_opadding, nonzero_vpadding = padding_k_idx(mycc, kind="split")
+        madelung = tools.madelung(cell, kpts)
+        if rank==0:
+            kccsd_rhf_numpy._eris_common_init(self, mycc, mo_coeff)
+        comm.barrier()
+        fock = comm.bcast(self.fock, root=0)
+        mo_coeff = self.mo_coeff = comm.bcast(self.mo_coeff, root=0)
+        self.dtype = dtype = np.result_type(*(mo_coeff, fock)).char
+        self.foo = zeros([nocc,nocc], dtype, mycc._sym1, symlib=symlib, verbose=mycc.SYMVERBOSE)
+        self.fov = zeros([nocc,nvir], dtype, mycc._sym1, symlib=symlib, verbose=mycc.SYMVERBOSE)
+        self.fvv = zeros([nvir,nvir], dtype, mycc._sym1, symlib=symlib, verbose=mycc.SYMVERBOSE)
+        self.eia = zeros([nocc,nvir], np.float64, mycc._sym1, symlib=symlib, verbose=mycc.SYMVERBOSE)
+        self._foo = zeros([nocc,nocc], dtype, mycc._sym1, symlib=symlib, verbose=mycc.SYMVERBOSE)
+        self._fvv = zeros([nvir,nvir], dtype, mycc._sym1, symlib=symlib, verbose=mycc.SYMVERBOSE)
 
         mo_energy = [fock[k].diagonal().real for k in range(nkpts)]
         mo_energy = [_adjust_occ(mo_e, nocc, -madelung)
                           for k, mo_e in enumerate(mo_energy)]
 
         mo_e_o = [e[:nocc] for e in mo_energy]
-        mo_e_v = [e[nocc:] + cc.level_shift for e in mo_energy]
-        foo_ = np.asarray([np.diag(e) for e in mo_e_o])
-        fvv_ = np.asarray([np.diag(e) for e in mo_e_v])
+        mo_e_v = [e[nocc:] + mycc.level_shift for e in mo_energy]
+
         eia = np.zeros([nkpts,nocc,nvir])
         for ki in range(nkpts):
             eia[ki] = _get_epq([0,nocc,ki,mo_e_o,nonzero_opadding],
                         [0,nvir,ki,mo_e_v,nonzero_vpadding],
                         fac=[1.0,-1.0])
         if rank ==0:
+            foo = fock[:,:nocc,:nocc]
+            fov = fock[:,:nocc,nocc:]
+            fvv = fock[:,nocc:,nocc:]
+            foo_ = np.asarray([np.diag(e) for e in mo_e_o])
+            fvv_ = np.asarray([np.diag(e) for e in mo_e_v])
             self.foo.write(range(foo.size), foo.ravel())
             self.fov.write(range(fov.size), fov.ravel())
             self.fvv.write(range(fvv.size), fvv.ravel())
@@ -393,14 +322,14 @@ class _ChemistsERIs:
             self._foo.write([],[])
             self._fvv.write([],[])
 
-        self.eijab = zeros([nocc,nocc,nvir,nvir], np.float64, sym2, symlib=symlib, verbose=cc.SYMVERBOSE)
+        self.eijab = zeros([nocc,nocc,nvir,nvir], np.float64, mycc._sym2, symlib=symlib, verbose=mycc.SYMVERBOSE)
 
-        kconserv = cc.khelper.kconserv
-        khelper = cc.khelper
+        kconserv = mycc.khelper.kconserv
+        khelper = mycc.khelper
 
         idx_oovv = np.arange(nocc*nocc*nvir*nvir)
         jobs = list(khelper.symm_map.keys())
-        tasks = static_partition(jobs)
+        tasks = mpi_helper.static_partition(jobs)
         ntasks = max(comm.allgather(len(tasks)))
         nwrite = 0
         for itask in tasks:
@@ -434,19 +363,19 @@ class _ChemistsERIs:
         for i in range(nwrite_max-write_count):
             self.eijab.write([], [])
 
-        if type(cc._scf.with_df) is df.FFTDF:
-            _make_fftdf_eris(cc, self)
+        if type(mycc._scf.with_df) is df.FFTDF:
+            _make_fftdf_eris(mycc, self)
         else:
             from cc_sym import mpigdf
-            if type(cc._scf.with_df) is mpigdf.GDF:
-                _make_df_eris(cc, self)
-            elif type(cc._scf.with_df) is df.GDF:
-                log.warn("GDF converted to an MPIGDF object")
-                cc._scf.with_df = mpigdf.from_serial(cc._scf.with_df)
-                _make_df_eris(cc, self)
+            if type(mycc._scf.with_df) is mpigdf.GDF:
+                _make_df_eris(mycc, self)
+            elif type(mycc._scf.with_df) is df.GDF:
+                logger.warn(mycc, "GDF converted to an MPIGDF object")
+                mycc._scf.with_df = mpigdf.from_serial(mycc._scf.with_df)
+                _make_df_eris(mycc, self)
             else:
                 raise NotImplementedError("DF object not recognized")
-        log.timer("ao2mo transformation", *cput0)
+        logger.timer(mycc, "ao2mo transformation", *cput0)
 
 if __name__ == '__main__':
     from pyscf.pbc import gto, scf, cc

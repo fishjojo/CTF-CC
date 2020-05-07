@@ -2,7 +2,7 @@
 
 
 '''
-Restricted Kpoint CCSD
+Restricted Kpoint CCSD with Numpy
 '''
 
 from functools import reduce
@@ -10,44 +10,72 @@ import time
 import numpy as np
 from pyscf import lib as pyscflib
 from cc_sym import rccsd_numpy
-from symtensor import sym as lib
+from symtensor import sym
 from symtensor.symlib import SYMLIB
 from pyscf.pbc.mp.kmp2 import (get_frozen_mask, get_nocc, get_nmo,
                                padded_mo_coeff, padding_k_idx)
 from pyscf.pbc.cc.kccsd_rhf import _get_epq
 from pyscf.pbc.lib import kpts_helper
-from pyscf.lib.logger import Logger
+from pyscf.lib import logger
 
-tensor = lib.tensor
-zeros = lib.zeros
+tensor = sym.tensor
+zeros = sym.zeros
 
-def energy(cc, t1, t2, eris):
-    log = Logger(cc.stdout, cc.verbose)
-    nkpts = len(cc.kpts)
+def energy(mycc, t1, t2, eris):
+    nkpts = len(mycc.kpts)
+    lib = mycc.lib
     e = 2*lib.einsum('ia,ia', eris.fov, t1)
     tau = lib.einsum('ia,jb->ijab',t1,t1)
     tau += t2
     e += 2*lib.einsum('ijab,iajb', tau, eris.ovov)
     e +=  -lib.einsum('ijab,ibja', tau, eris.ovov)
     if abs(e.imag)>1e-4:
-        log.warn('Non-zero imaginary part found in KRCCSD energy %s', e)
+        logger.warn(mycc, 'Non-zero imaginary part found in KRCCSD energy %s', e)
     return e.real / nkpts
+
+def init_amps(mycc, eris):
+    time0 = time.clock(), time.time()
+    lib = mycc.lib
+    nocc = mycc.nocc
+    nvir = mycc.nmo - nocc
+    nkpts = mycc.nkpts
+
+    t1 = lib.zeros([nocc,nvir], eris.dtype, mycc._sym1)
+    t2 = eris.ovov.transpose(0,2,1,3).conj() / eris.eijab
+    mycc.emp2  = 2*lib.einsum('ijab,iajb', t2, eris.ovov)
+    mycc.emp2 -=   lib.einsum('ijab,ibja', t2, eris.ovov)
+    mycc.emp2  =   mycc.emp2.real/nkpts
+    logger.info(mycc, 'Init t2, MP2 energy (with fock eigenvalue shift) = %.15g', mycc.emp2)
+    logger.timer(mycc, 'init mp2', *time0)
+    return mycc.emp2, t1, t2
 
 class KRCCSD(rccsd_numpy.RCCSD):
 
-    def __init__(self, mf, frozen=0, mo_coeff=None, mo_occ=None):
-        rccsd_numpy.RCCSD.__init__(self, mf, frozen, mo_coeff, mo_occ)
+    def __init__(self, mf, frozen=0, mo_coeff=None, mo_occ=None, SYMVERBOSE=0):
+        rccsd_numpy.RCCSD.__init__(self, mf, frozen, mo_coeff, mo_occ, SYMVERBOSE)
         self.kpts = mf.kpts
         self.khelper = kpts_helper.KptsHelper(mf.cell, mf.kpts)
         self.max_space = 20
         self._keys = self._keys.union(['max_space'])
-        self.lib = lib
-        self.symlib = SYMLIB('numpy')
+        self.lib = sym
+        self.symlib = SYMLIB(self._backend)
         self.make_symlib()
 
     @property
     def nkpts(self):
         return len(self.kpts)
+
+    @property
+    def _sym1(self):
+        kpts = self.kpts
+        gvec = self._scf.cell.reciprocal_vectors()
+        return ['+-',[kpts,]*2, None, gvec]
+
+    @property
+    def _sym2(self):
+        kpts = self.kpts
+        gvec = self._scf.cell.reciprocal_vectors()
+        return ['++--',[kpts,]*4, None, gvec]
 
     def vector_to_amplitudes(self, vec, nmo=None, nocc=None):
         if nocc is None: nocc = self.nocc
@@ -60,42 +88,21 @@ class KRCCSD(rccsd_numpy.RCCSD):
 
         kpts = self.kpts
         gvec = self._scf.cell.reciprocal_vectors()
-        sym1 = ['+-',[kpts,]*2, None, gvec]
-        sym2 = ['++--',[kpts,]*4, None, gvec]
-        t1  = tensor(t1, sym1)
-        t2  = tensor(t2, sym2)
+        t1  = self.lib.tensor(t1, self._sym1, symlib=self.symlib, verbose=self.SYMVERBOSE)
+        t2  = self.lib.tensor(t2, self._sym2, symlib=self.symlib, verbose=self.SYMVERBOSE)
         return t1, t2
 
     def make_symlib(self):
         kpts = self.kpts
         gvec = self._scf.cell.reciprocal_vectors()
-        sym1 = ['+-',[kpts,]*2, None, gvec]
-        sym2 = ['++--',[kpts,]*4, None, gvec]
         sym3 = ['++-',[kpts,]*3, None, gvec]
-        self.symlib.update(sym1, sym2, sym3)
+        self.symlib.update(self._sym1, self._sym2, sym3)
 
     energy = energy
     get_nocc = get_nocc
     get_nmo = get_nmo
     get_frozen_mask = get_frozen_mask
-
-    def init_amps(self, eris):
-        time0 = time.clock(), time.time()
-        log = Logger(self.stdout, self.verbose)
-        nocc = self.nocc
-        nvir = self.nmo - nocc
-        kpts = self.kpts
-        nkpts = self.nkpts
-        gvec = self._scf.cell.reciprocal_vectors()
-        sym1 = ['+-', [kpts,]*2, None, gvec]
-        t1 = lib.zeros([nocc,nvir], eris.dtype, sym1)
-        t2 = eris.ovov.transpose(0,2,1,3).conj() / eris.eijab
-        self.emp2  = 2*lib.einsum('ijab,iajb', t2, eris.ovov)
-        self.emp2 -=   lib.einsum('ijab,ibja', t2, eris.ovov)
-        self.emp2 = self.emp2.real/nkpts
-        log.info('Init t2, MP2 energy (with fock eigenvalue shift) = %.15g', self.emp2)
-        log.timer('init mp2', *time0)
-        return self.emp2, t1, t2
+    init_amps = init_amps
 
     def ao2mo(self, mo_coeff=None):
         return _ChemistsERIs(self, mo_coeff)
@@ -115,47 +122,54 @@ class KRCCSD(rccsd_numpy.RCCSD):
                                                 guess=guess, left=left,
                                                 eris=eris, partition=partition,
                                                 kptlist=kptlist)
+def _eris_common_init(eris, mycc, mo_coeff):
+    eris.lib = mycc.lib
+    if mo_coeff is None:
+        mo_coeff = mycc.mo_coeff
+    cell = mycc._scf.cell
+    eris.mo_coeff = mo_coeff = padded_mo_coeff(mycc, mo_coeff)
+    dm = mycc._scf.make_rdm1(mycc.mo_coeff, mycc.mo_occ)
+    with pyscflib.temporary_env(mycc._scf, exxdiv=None):
+        fockao = mycc._scf.get_hcore() + mycc._scf.get_veff(cell, dm)
+    eris.fock = np.asarray([reduce(np.dot, (mo.T.conj(), fockao[k], mo))
+                        for k, mo in enumerate(mo_coeff)])
 
 class _ChemistsERIs:
-    def __init__(self, cc, mo_coeff=None):
+    def __init__(self, mycc, mo_coeff=None):
         from pyscf.pbc.cc.ccsd import _adjust_occ
         import pyscf.pbc.tools.pbc as tools
-        if mo_coeff is None:
-            mo_coeff = cc.mo_coeff
+
         cput0 = (time.clock(), time.time())
-        log = Logger(cc.stdout, cc.verbose)
-        self.lib = lib
-        nocc, nmo, nkpts = cc.nocc, cc.nmo, cc.nkpts
+
+        nocc, nmo, nkpts = mycc.nocc, mycc.nmo, mycc.nkpts
         nvir = nmo - nocc
-        cell, kpts = cc._scf.cell, cc.kpts
+        cell, kpts = mycc._scf.cell, mycc.kpts
         gvec = cell.reciprocal_vectors()
-        sym1 = ['+-', [kpts,]*2, None, gvec]
         sym2 = ['+-+-', [kpts,]*4, None, gvec]
-        mo_coeff = self.mo_coeff = padded_mo_coeff(cc, mo_coeff)
-        nonzero_opadding, nonzero_vpadding = padding_k_idx(cc, kind="split")
+
+        nonzero_opadding, nonzero_vpadding = padding_k_idx(mycc, kind="split")
         madelung = tools.madelung(cell, kpts)
 
-        dm = cc._scf.make_rdm1(cc.mo_coeff, cc.mo_occ)
-        with pyscflib.temporary_env(cc._scf, exxdiv=None):
-            fockao = cc._scf.get_hcore() + cc._scf.get_veff(cell, dm)
-        fock = np.asarray([reduce(np.dot, (mo.T.conj(), fockao[k], mo))
-                            for k, mo in enumerate(mo_coeff)])
+        _eris_common_init(self, mycc, mo_coeff)
+
+        fock = self.fock
+        mo_coeff = self.mo_coeff
 
         self.dtype = dtype = np.result_type(*fock).char
-        self.foo = tensor(fock[:,:nocc,:nocc], sym1)
-        self.fov = tensor(fock[:,:nocc,nocc:], sym1)
-        self.fvv = tensor(fock[:,nocc:,nocc:], sym1)
+        self.foo = tensor(fock[:,:nocc,:nocc], mycc._sym1)
+        self.fov = tensor(fock[:,:nocc,nocc:], mycc._sym1)
+        self.fvv = tensor(fock[:,nocc:,nocc:], mycc._sym1)
 
         mo_energy = [fock[k].diagonal().real for k in range(nkpts)]
         mo_energy = [_adjust_occ(mo_e, nocc, -madelung)
                           for k, mo_e in enumerate(mo_energy)]
 
         mo_e_o = [e[:nocc] for e in mo_energy]
-        mo_e_v = [e[nocc:] + cc.level_shift for e in mo_energy]
+        mo_e_v = [e[nocc:] + mycc.level_shift for e in mo_energy]
         foo_ = np.asarray([np.diag(e) for e in mo_e_o])
         fvv_ = np.asarray([np.diag(e) for e in mo_e_v])
-        self._foo = tensor(foo_, sym1)
-        self._fvv = tensor(fvv_, sym1)
+        self._foo = tensor(foo_, mycc._sym1)
+        self._fvv = tensor(fvv_, mycc._sym1)
 
         eia = np.zeros([nkpts,nocc,nvir])
         for ki in range(nkpts):
@@ -163,7 +177,7 @@ class _ChemistsERIs:
                         [0,nvir,ki,mo_e_v,nonzero_vpadding],
                         fac=[1.0,-1.0])
 
-        self.eia = tensor(eia, sym1)
+        self.eia = tensor(eia, mycc._sym1)
         self.oooo = zeros([nocc,nocc,nocc,nocc], dtype, sym2)
         self.ooov = zeros([nocc,nocc,nocc,nvir], dtype, sym2)
         self.ovov = zeros([nocc,nvir,nocc,nvir], dtype, sym2)
@@ -171,12 +185,12 @@ class _ChemistsERIs:
         self.ovvo = zeros([nocc,nvir,nvir,nocc], dtype, sym2)
         self.ovvv = zeros([nocc,nvir,nvir,nvir], dtype, sym2)
         self.vvvv = zeros([nvir,nvir,nvir,nvir], dtype, sym2)
-        self.eijab = zeros([nocc,nocc,nvir,nvir], np.float64, sym2)
+        self.eijab = zeros([nocc,nocc,nvir,nvir], np.float64, mycc._sym2)
 
-        with_df = cc._scf.with_df
-        fao2mo = cc._scf.with_df.ao2mo
-        kconserv = cc.khelper.kconserv
-        khelper = cc.khelper
+        with_df = mycc._scf.with_df
+        fao2mo = mycc._scf.with_df.ao2mo
+        kconserv = mycc.khelper.kconserv
+        khelper = mycc.khelper
 
         jobs = list(khelper.symm_map.keys())
         for itask in jobs:
@@ -216,7 +230,7 @@ class _ChemistsERIs:
                 self.eijab.array[kp,kr,kq] = eijab
                 done[kp,kq,kr] = 1
 
-        log.timer("ao2mo transformation", *cput0)
+        logger.timer(mycc, "ao2mo transformation", *cput0)
 if __name__ == '__main__':
     from pyscf.pbc import gto, scf, cc
     import os

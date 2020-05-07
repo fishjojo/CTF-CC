@@ -7,12 +7,12 @@ from cc_sym import eom_rccsd_numpy, rccsd_numpy
 import numpy as np
 import time
 from pyscf.pbc.mp.kmp2 import padding_k_idx
-import symtensor.sym as lib
-from pyscf.lib.logger import Logger
+from symtensor import sym
+from pyscf.lib import logger
 
 
-tensor = lib.tensor
-zeros = lib.zeros
+tensor = sym.tensor
+zeros = sym.zeros
 
 def kernel(eom, nroots=1, koopmans=True, guess=None, left=False,
            eris=None, imds=None, partition=None, kptlist=None,
@@ -21,7 +21,6 @@ def kernel(eom, nroots=1, koopmans=True, guess=None, left=False,
     cput0 = (time.clock(), time.time())
     eom.dump_flags()
 
-    log = Logger(eom.stdout, eom.verbose)
     if imds is None:
         imds = eom.make_imds(eris)
 
@@ -60,8 +59,8 @@ def kernel(eom, nroots=1, koopmans=True, guess=None, left=False,
         for n, en, vn in zip(range(nroots), evals_k, evecs_k.T):
             r1, r2 = eom.vector_to_amplitudes(vn, kshift)
             qp_weight = r1.norm()**2
-            log.info('EOM-CCSD root %d E = %.16g  qpwt = %0.6g', n, en, qp_weight)
-    log.timer('EOM-CCSD', *cput0)
+            logger.info(eom, 'EOM-CCSD root %d E = %.16g  qpwt = %0.6g', n, en, qp_weight)
+    logger.timer(eom, 'EOM-CCSD', *cput0)
     evecs = np.vstack(tuple(evecs))
     return convs, evals, evecs
 
@@ -75,8 +74,8 @@ def vector_to_amplitudes_ip(eom, vector, kshift):
     sym2 = ['++-', [kpts,]*3, kpts[kshift], gvec]
     r1 = vector[:nocc].copy()
     r2 = vector[nocc:].copy().reshape(nkpts,nkpts,nocc,nocc,nvir)
-    r1 = tensor(r1, sym1, symlib=eom.symlib)
-    r2 = tensor(r2, sym2, symlib=eom.symlib)
+    r1 = tensor(r1, sym1, symlib=eom.symlib, verbose=eom.SYMVERBOSE)
+    r2 = tensor(r2, sym2, symlib=eom.symlib, verbose=eom.SYMVERBOSE)
     return [r1,r2]
 
 def vector_to_amplitudes_ea(eom, vector, kshift):
@@ -102,8 +101,8 @@ def ipccsd_diag(eom, kshift, imds=None):
     Hr1array = -imds.Loo.diagonal()[kshift]
     sym1 = ['+', [kpts,], kpts[kshift], gvec]
     sym2 = ['++-', [kpts,]*3, kpts[kshift], gvec]
-    Hr1 = tensor(Hr1array, sym1, symlib=eom.symlib)
-    Hr2 = zeros([nocc,nocc,nvir], dtype, sym2, symlib=eom.symlib)
+    Hr1 = tensor(Hr1array, sym1, symlib=eom.symlib, verbose = eom.SYMVERBOSE)
+    Hr2 = zeros([nocc,nocc,nvir], dtype, sym2, symlib=eom.symlib, verbose=eom.SYMVERBOSE)
 
     if eom.partition == 'mp':
         foo = eom.eris.foo.diagonal()
@@ -149,6 +148,7 @@ def ipccsd_diag(eom, kshift, imds=None):
 def ipccsd_matvec(eom, vector, kshift, imds=None, diag=None):
     # Ref: Nooijen and Snijders, J. Chem. Phys. 102, 1681 (1995) Eqs.(8)-(9)
     if imds is None: imds = eom.make_imds()
+    lib = eom.lib
     r1,r2 = eom.vector_to_amplitudes(vector, kshift)
 
     # 1h-1h block
@@ -189,6 +189,7 @@ def ipccsd_matvec(eom, vector, kshift, imds=None, diag=None):
 def eaccsd_matvec(eom, vector, kshift, imds=None, diag=None):
     # Ref: Nooijen and Bartlett, J. Chem. Phys. 102, 3629 (1994) Eqs.(30)-(31)
     if imds is None: imds = eom.make_imds()
+    lib = eom.lib
     r1,r2 = eom.vector_to_amplitudes(vector, kshift)
 
     # Eq. (30)
@@ -241,8 +242,8 @@ def eaccsd_diag(eom, kshift, imds=None, diag=None):
     sym2 = ['-++', [kpts,]*3, kpts[kshift], gvec]
 
     Hr1array = imds.Lvv.diagonal()[kshift]
-    Hr1 = tensor(Hr1array, sym1, symlib=eom.symlib)
-    Hr2 = zeros([nocc,nvir,nvir], dtype, sym2, symlib=eom.symlib)
+    Hr1 = tensor(Hr1array, sym1, symlib=eom.symlib, verbose=eom.SYMVERBOSE)
+    Hr2 = zeros([nocc,nvir,nvir], dtype, sym2, symlib=eom.symlib, verbose=eom.SYMVERBOSE)
     idx_jab = np.arange(nocc*nvir*nvir)
     if eom.partition == 'mp':
         foo = imds.eris.foo.diagonal()
@@ -285,14 +286,14 @@ def eaccsd_diag(eom, kshift, imds=None, diag=None):
     return eom.amplitudes_to_vector(Hr1, Hr2)
 
 class EOMIP(eom_rccsd_numpy.EOMIP):
-    def __init__(self, cc):
-        eom_rccsd_numpy.EOMIP.__init__(self,cc)
-        self.kpts = cc.kpts
-        self.lib = cc.lib
-        self.symlib = cc.symlib
-        self.t1, self.t2 = cc.t1, cc.t2
-        self.nonzero_opadding, self.nonzero_vpadding = self.get_padding_k_idx(cc)
-        self.kconserv = cc.khelper.kconserv
+    def __init__(self, mycc):
+        eom_rccsd_numpy.EOMIP.__init__(self,mycc)
+        self.kpts = mycc.kpts
+        self.lib = mycc.lib
+        self.symlib = mycc.symlib
+        self.t1, self.t2 = mycc.t1, mycc.t2
+        self.nonzero_opadding, self.nonzero_vpadding = self.get_padding_k_idx(mycc)
+        self.kconserv = mycc.khelper.kconserv
 
     matvec = ipccsd_matvec
     vector_to_amplitudes = vector_to_amplitudes_ip
@@ -300,8 +301,8 @@ class EOMIP(eom_rccsd_numpy.EOMIP):
     kernel = kernel
     ipccsd = kernel
 
-    def get_padding_k_idx(self, cc):
-        return padding_k_idx(cc, kind='split')
+    def get_padding_k_idx(self, mycc):
+        return padding_k_idx(mycc, kind='split')
 
     def vector_size(self):
         nocc = self.nocc
@@ -346,13 +347,13 @@ class EOMIP(eom_rccsd_numpy.EOMIP):
 
 class EOMEA(eom_rccsd_numpy.EOMEA):
     def __init__(self, cc):
-        eom_rccsd_numpy.EOMEA.__init__(self,cc)
-        self.kpts = cc.kpts
-        self.lib = cc.lib
-        self.symlib = cc.symlib
-        self.t1, self.t2 = cc.t1, cc.t2
-        self.nonzero_opadding, self.nonzero_vpadding = self.get_padding_k_idx(cc)
-        self.kconserv = cc.khelper.kconserv
+        eom_rccsd_numpy.EOMEA.__init__(self, mycc)
+        self.kpts = mycc.kpts
+        self.lib = mycc.lib
+        self.symlib = mycc.symlib
+        self.t1, self.t2 = mycc.t1, mycc.t2
+        self.nonzero_opadding, self.nonzero_vpadding = self.get_padding_k_idx(mycc)
+        self.kconserv = mycc.khelper.kconserv
 
     matvec = eaccsd_matvec
     vector_to_amplitudes = vector_to_amplitudes_ea
@@ -360,8 +361,8 @@ class EOMEA(eom_rccsd_numpy.EOMEA):
     eaccsd = kernel
     kernel = kernel
 
-    def get_padding_k_idx(self, cc):
-        return padding_k_idx(cc, kind='split')
+    def get_padding_k_idx(self, mycc):
+        return padding_k_idx(mycc, kind='split')
 
     @property
     def nkpts(self):
@@ -430,6 +431,9 @@ if __name__ == '__main__':
     mycc.kernel()
 
     myeom = EOMIP(mycc)
-    myeom.ipccsd(nroots=2, kptlist=[1], koopmans=True)
+    _, eip, _ = myeom.ipccsd(nroots=2, kptlist=[1], koopmans=True)
     myeom = EOMEA(mycc)
-    myeom.eaccsd(nroots=2, kptlist=[1], koopmans=True)
+    _, eea, _ = myeom.eaccsd(nroots=2, kptlist=[1], koopmans=True)
+
+    print(eip[0,1]- -0.5392478826367997)
+    print(eea[0,0]- 1.147581866049977)

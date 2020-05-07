@@ -6,16 +6,15 @@ from pyscf.cc.eom_rccsd import EOM
 import numpy as np
 import time
 import cc_sym.rintermediates as imd
-import symtensor.sym as lib
-from pyscf.lib.logger import Logger
+from symtensor import sym
+from pyscf.lib import logger
 
-tensor = lib.tensor
+tensor = sym.tensor
 def kernel(eom, nroots=1, koopmans=True, guess=None, left=False,
            eris=None, imds=None, partition=None, kptlist=None,
            dtype=None, **kwargs):
 
     cput0 = (time.clock(), time.time())
-    log = Logger(eom.stdout, eom.verbose)
     eom.dump_flags()
 
     if imds is None:
@@ -40,8 +39,8 @@ def kernel(eom, nroots=1, koopmans=True, guess=None, left=False,
     for n, en, vn in zip(range(nroots), evals, evecs.T):
         r1, r2 = eom.vector_to_amplitudes(vn)
         qp_weight = r1.norm()**2
-        log.info('EOM-CCSD root %d E = %.16g  qpwt = %0.6g', n, en, qp_weight)
-    log.timer('EOM-CCSD', *cput0)
+        logger.info(eom, 'EOM-CCSD root %d E = %.16g  qpwt = %0.6g', n, en, qp_weight)
+    logger.timer(eom, 'EOM-CCSD', *cput0)
     return conv, evals, evecs
 
 def amplitudes_to_vector(eom, r1, r2):
@@ -53,8 +52,8 @@ def vector_to_amplitudes_ip(eom, vector):
     nvir = eom.nmo - nocc
     r1 = vector[:nocc].copy()
     r2 = vector[nocc:].copy().reshape(nocc,nocc,nvir)
-    r1 = tensor(r1)
-    r2 = tensor(r2)
+    r1 = tensor(r1, verbose=eom.SYMVERBOSE)
+    r2 = tensor(r2, verbose=eom.SYMVERBOSE)
     return [r1,r2]
 
 def vector_to_amplitudes_ea(eom, vector):
@@ -62,13 +61,14 @@ def vector_to_amplitudes_ea(eom, vector):
     nvir = eom.nmo - nocc
     r1 = vector[:nvir].copy()
     r2 = vector[nvir:].copy().reshape(nocc,nvir,nvir)
-    r1 = tensor(r1)
-    r2 = tensor(r2)
+    r1 = tensor(r1, verbose=eom.SYMVERBOSE)
+    r2 = tensor(r2, verbose=eom.SYMVERBOSE)
     return [r1,r2]
 
 def ipccsd_matvec(eom, vector, imds=None, diag=None):
     # Ref: Nooijen and Snijders, J. Chem. Phys. 102, 1681 (1995) Eqs.(8)-(9)
     if imds is None: imds = eom.make_imds()
+    lib = eom.lib
     r1,r2 = eom.vector_to_amplitudes(vector)
 
     # 1h-1h block
@@ -109,10 +109,10 @@ def ipccsd_matvec(eom, vector, imds=None, diag=None):
 def ipccsd_diag(eom, imds=None):
     if imds is None: imds = eom.make_imds()
     t1, t2 = imds.t1, imds.t2
+    lib = eom.lib
     nocc, nvir = t1.shape
     foo = imds.eris.foo
     fvv = imds.eris.fvv
-
     Hr1 = - imds.Loo.diagonal()
     Hr1 = tensor(Hr1)
     if eom.partition == 'mp':
@@ -144,6 +144,7 @@ def ipccsd_diag(eom, imds=None):
 def eaccsd_matvec(eom, vector, imds=None, diag=None):
     # Ref: Nooijen and Bartlett, J. Chem. Phys. 102, 3629 (1994) Eqs.(30)-(31)
     if imds is None: imds = eom.make_imds()
+    lib = eom.lib
     r1,r2 = eom.vector_to_amplitudes(vector)
 
     # Eq. (30)
@@ -185,6 +186,7 @@ def eaccsd_matvec(eom, vector, imds=None, diag=None):
 
 def eaccsd_diag(eom, imds=None):
     if imds is None: imds = eom.make_imds()
+    lib = eom.lib
     t1, t2 = imds.t1, imds.t2
     nocc, nvir = t1.shape
     foo = imds.eris.foo
@@ -217,11 +219,13 @@ def eaccsd_diag(eom, imds=None):
     return vector
 
 class EOMIP(EOM):
-    def __init__(self, cc):
-        EOM.__init__(self,cc)
-        self.lib = cc.lib
-        self.symlib = cc.symlib
-        self.t1, self.t2 = cc.t1, cc.t2
+    def __init__(self, mycc):
+        EOM.__init__(self, mycc)
+        self.lib = mycc.lib
+        self.symlib = mycc.symlib
+        self.t1, self.t2 = mycc.t1, mycc.t2
+        self.SYMVERBOSE = mycc.SYMVERBOSE
+        self._backend = mycc._backend
 
     amplitudes_to_vector = amplitudes_to_vector
     vector_to_amplitudes = vector_to_amplitudes_ip
@@ -314,40 +318,38 @@ class EOMEA(EOMIP):
         return self.e
 
 class _IMDS:
-    def __init__(self, cc, eris=None):
-        self.t1 = cc.t1
-        self.t2 = cc.t2
-        self.stdout, self.verbose= cc.stdout, cc.verbose
+    def __init__(self, mycc, eris=None):
+        self.t1 = mycc.t1
+        self.t2 = mycc.t2
+        self.stdout, self.verbose= mycc.stdout, mycc.verbose
         if eris is None:
-            if cc.eris is None:
-                self.eris = cc.ao2mo()
+            if mycc.eris is None:
+                self.eris = mycc.ao2mo()
             else:
-                self.eris = cc.eris
+                self.eris = mycc.eris
         self.made_ip_imds = False
         self.made_ea_imds = False
         self._made_shared_2e = False
-        self.symlib = cc.symlib
+        self.symlib = mycc.symlib
 
     def _make_shared_1e(self):
         cput0 = (time.clock(), time.time())
-        log = Logger(self.stdout, self.verbose)
         t1,t2,eris = self.t1, self.t2, self.eris
         self.Loo = imd.Loo(t1,t2,eris)
         self.Lvv = imd.Lvv(t1,t2,eris)
         self.Fov = imd.cc_Fov(t1,t2,eris)
 
-        log.timer('EOM-CCSD shared one-electron intermediates', *cput0)
+        logger.timer(self, 'EOM-CCSD shared one-electron intermediates', *cput0)
 
     def _make_shared_2e(self):
         cput0 = (time.clock(), time.time())
-        log = Logger(self.stdout, self.verbose)
         t1,t2,eris = self.t1, self.t2, self.eris
         # 2 virtuals
         self.Wovov = imd.Wovov(t1,t2,eris)
         self.Wovvo = imd.Wovvo(t1,t2,eris)
         self.Woovv = eris.ovov.transpose(0,2,1,3)
 
-        log.timer('EOM-CCSD shared two-electron intermediates', *cput0)
+        logger.timer(self, 'EOM-CCSD shared two-electron intermediates', *cput0)
 
     def make_ip(self, partition=None):
         self._make_shared_1e()
@@ -356,7 +358,6 @@ class _IMDS:
             self._made_shared_2e = True
 
         cput0 = (time.clock(), time.time())
-        log = Logger(self.stdout, self.verbose)
         t1,t2,eris = self.t1, self.t2, self.eris
 
         # 0 or 1 virtuals
@@ -365,7 +366,7 @@ class _IMDS:
         self.Wooov = imd.Wooov(t1,t2,eris)
         self.Wovoo = imd.Wovoo(t1,t2,eris)
         self.made_ip_imds = True
-        log.timer('EOM-CCSD IP intermediates', *cput0)
+        logger.timer(self, 'EOM-CCSD IP intermediates', *cput0)
 
     def make_ea(self, partition=None):
         self._make_shared_1e()
@@ -374,7 +375,6 @@ class _IMDS:
             self._made_shared_2e = True
 
         cput0 = (time.clock(), time.time())
-        log = Logger(self.stdout, self.verbose)
         t1,t2,eris = self.t1, self.t2, self.eris
 
         # 3 or 4 virtuals
@@ -385,7 +385,7 @@ class _IMDS:
             self.Wvvvv = imd.Wvvvv(t1,t2,eris)
             self.Wvvvo = imd.Wvvvo(t1,t2,eris,self.Wvvvv)
         self.made_ea_imds = True
-        log.timer('EOM-CCSD EA intermediates', *cput0)
+        logger.timer(self, 'EOM-CCSD EA intermediates', *cput0)
 
     def make_ee(self):
         raise NotImplementedError
@@ -408,6 +408,12 @@ if __name__ == '__main__':
     mycc = RCCSD(mf)
     mycc.kernel()
     myeom = EOMIP(mycc)
-    myeom.ipccsd(nroots=2)
+    _, eip, _ = myeom.ipccsd(nroots=2)
     myeom = EOMEA(mycc)
-    myeom.eaccsd(nroots=2)
+    _, eea, _ = myeom.eaccsd(nroots=2)
+
+    print(np.amax(eip[0]-0.4335604229241659))
+    print(np.amax(eip[1]-0.5187659782655635))
+
+    print(np.amax(eea[0]-0.1673788639606518))
+    print(np.amax(eea[1]-0.2402762272383755))
