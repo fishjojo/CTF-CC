@@ -180,6 +180,7 @@ class _PhysicistsERIs:
     '''<pq||rs> = <pq|rs> - <pq|sr>'''
     def __init__(self, mycc, mo_coeff=None):
         lib = self.lib = mycc.lib
+        self.focka = self.fockb = self.mo_coeff = None
         if rank==0:
             uccsd_sym_numpy._eris_common_init(self, mycc, mo_coeff)
         comm.barrier()
@@ -191,7 +192,7 @@ class _PhysicistsERIs:
         nmoa, nmob = mycc.nmo
         nvira, nvirb = nmoa-nocca, nmob-noccb
         nocc, nvir = mycc._no, mycc._nv
-        mo_coeff = self.mo_coeff
+        mo_coeff = self.mo_coeff = comm.bcast(self.mo_coeff, root=0)
 
         def get_idx(string):
             dict_partial = {'o':nocca, 'O':noccb, 'v':nvira, 'V':nvirb}
@@ -289,9 +290,5 @@ if __name__ == '__main__':
     frozen = [0,1,2,3]
     frozen = None
     gcc = UCCSD(mf, frozen=frozen)
-    gcc.kernel()
-
-    gmf = scf.addons.convert_to_ghf(mf)
-    from cc_sym.gccsd import GCCSD
-    gcc = GCCSD(gmf)
-    gcc.kernel()
+    ecc, t1, t2 = gcc.kernel()
+    print(abs(ecc - -0.3522309165445502))

@@ -50,6 +50,7 @@ class _PhysicistsERIs:
     '''<pq||rs> = <pq|rs> - <pq|sr>'''
     def __init__(self, mycc, mo_coeff=None):
         cput1 = cput0 = (time.clock(), time.time())
+        self.fock = self.mo_coeff = self.e_hf = None
         gccsd_numpy._eris_common_init(self, mycc, mo_coeff)
         mo_coeff = self.mo_coeff = comm.bcast(self.mo_coeff, root=0)
         if rank==0:
@@ -195,9 +196,4 @@ if __name__ == '__main__':
     frozen = [0,1,2,3]
     gcc = GCCSD(mf, frozen=frozen)
     ecc0, t1, t2 = gcc.kernel()
-
-    from pyscf.cc import GCCSD as REFG
-    if rank==0:
-        gcc = REFG(mf, frozen=frozen)
-        ecc, t1, t2 = gcc.kernel()
-        print(ecc0, ecc)
+    print(abs(ecc0 - -0.2872017489522927))

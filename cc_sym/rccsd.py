@@ -51,7 +51,7 @@ class _ChemistsERIs:
         nocc, nmo = mycc.nocc, mycc.nmo
         nvir = nmo - nocc
         cput1 = cput0 = (time.clock(), time.time())
-
+        self.fock = self.mo_coeff = None
         if rank==0:
             rccsd_numpy._eris_common_init(self, mycc, mo_coeff)
         comm.barrier()
